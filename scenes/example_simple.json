@@ -164,7 +164,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "wall-back",
@@ -173,7 +174,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "wall-left",
@@ -182,7 +184,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "wall-right",
@@ -200,7 +203,8 @@
       "rough": 0,
       "ior": 1.5,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "glass-tinted",
@@ -209,7 +213,8 @@
       "rough": 0,
       "ior": 1.5,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0.1, "g": 0.05, "b": 0 }
     },
     {
       "id": "metal-rough",
@@ -218,7 +223,8 @@
       "rough": 0.3,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-smooth",
@@ -236,7 +242,8 @@
       "rough": 0.1,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "mirror-perfect",
@@ -245,7 +252,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-red",
@@ -254,7 +262,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-green",
@@ -263,7 +272,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-blue",
@@ -281,7 +291,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 1.0, "g": 0.0, "b": 0.0 },
-      "power": 3
+      "power": 3,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "light-sphere-warm",
@@ -290,7 +301,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0.0, "g": 1.0, "b": 0.0 },
-      "power": 3
+      "power": 3,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "light-sphere-cool",

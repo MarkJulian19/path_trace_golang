@@ -181,20 +181,38 @@ func (b box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	rec.t = t0
 	rec.p = r.at(t0)
 
-	// approximate normal: determine which face was hit
-	const eps = 1e-4
+	// Правильное вычисление нормали: определяем, какая грань была пересечена
+	// Используем более точный метод на основе направления луча
 	var n vec3
-	if math.Abs(rec.p.x-b.min.x) < eps {
-		n = v(-1, 0, 0)
-	} else if math.Abs(rec.p.x-b.max.x) < eps {
+	// Вычисляем расстояние от точки до каждой грани
+	dxMin := rec.p.x - b.min.x
+	dxMax := b.max.x - rec.p.x
+	dyMin := rec.p.y - b.min.y
+	dyMax := b.max.y - rec.p.y
+	dzMin := rec.p.z - b.min.z
+	dzMax := b.max.z - rec.p.z
+
+	// Находим минимальное расстояние (ближайшая грань)
+	minDist := dxMin
+	n = v(-1, 0, 0)
+
+	if dxMax < minDist {
+		minDist = dxMax
 		n = v(1, 0, 0)
-	} else if math.Abs(rec.p.y-b.min.y) < eps {
+	}
+	if dyMin < minDist {
+		minDist = dyMin
 		n = v(0, -1, 0)
-	} else if math.Abs(rec.p.y-b.max.y) < eps {
+	}
+	if dyMax < minDist {
+		minDist = dyMax
 		n = v(0, 1, 0)
-	} else if math.Abs(rec.p.z-b.min.z) < eps {
+	}
+	if dzMin < minDist {
+		minDist = dzMin
 		n = v(0, 0, -1)
-	} else {
+	}
+	if dzMax < minDist {
 		n = v(0, 0, 1)
 	}
 

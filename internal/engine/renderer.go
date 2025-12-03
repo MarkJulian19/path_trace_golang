@@ -279,6 +279,88 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 	if !ok {
 		return emitted
 	}
+
+	// Для диэлектриков: если луч преломляется (не отражается), находим следующее пересечение
+	// с тем же объектом для вычисления реального расстояния прохождения
+	if rec.mat.typ == matDielectric {
+		// Проверяем, преломляется ли луч (направление указывает внутрь объекта)
+		// Если frontFace было true при входе, значит мы входим, и нужно найти выход
+		if rec.frontFace {
+			// Луч входит в объект - ищем выходную грань
+			// Используем очень маленький tMin для выхода из объекта
+			const exitTMin = 0.0001
+			var exitRec hitRecord
+			hitExit := false
+			exitT := math.MaxFloat64
+
+			// Ищем следующее пересечение с объектом того же типа материала
+			// Проверяем, что это выходная грань (frontFace = false) и разумное расстояние
+			for i := range world {
+				var tempRec hitRecord
+				if world[i].hit(scattered, exitTMin, exitT, &tempRec) {
+					// Проверяем, что это тот же тип материала и выходная грань
+					if tempRec.mat.typ == matDielectric && !tempRec.frontFace && tempRec.t < exitT {
+						// Вычисляем расстояние для проверки разумности
+						dx := tempRec.p.x - rec.p.x
+						dy := tempRec.p.y - rec.p.y
+						dz := tempRec.p.z - rec.p.z
+						distSq := dx*dx + dy*dy + dz*dz
+
+						// Проверяем, что расстояние разумное (не слишком большое, не слишком маленькое)
+						// Это помогает убедиться, что мы нашли выход того же объекта
+						if distSq > 1e-8 && distSq < 1000.0 {
+							hitExit = true
+							exitT = tempRec.t
+							exitRec = tempRec
+						}
+					}
+				}
+			}
+
+			// Если нашли выходную грань, вычисляем реальное расстояние и применяем поглощение
+			if hitExit {
+				// Вычисляем расстояние прохождения через материал
+				dx := exitRec.p.x - rec.p.x
+				dy := exitRec.p.y - rec.p.y
+				dz := exitRec.p.z - rec.p.z
+				distance := math.Sqrt(dx*dx + dy*dy + dz*dz)
+
+				// Применяем Beer-Lambert law с реальным расстоянием
+				if rec.mat.absorption.x > 0 || rec.mat.absorption.y > 0 || rec.mat.absorption.z > 0 {
+					attenuation.x = math.Exp(-rec.mat.absorption.x * distance)
+					attenuation.y = math.Exp(-rec.mat.absorption.y * distance)
+					attenuation.z = math.Exp(-rec.mat.absorption.z * distance)
+				}
+
+				// Обновляем scattered луч на выходную точку с правильным направлением
+				// Направление уже правильное (преломленное), просто обновляем точку
+				scattered.orig = exitRec.p
+			}
+		}
+	}
+
+	// Russian Roulette: раннее завершение пути с вероятностью, основанной на яркости
+	// Это ускоряет рендеринг без потери качества
+	const rrThreshold = 3 // начинаем применять RR после 3 отскоков
+	if depth <= rrThreshold {
+		// Вычисляем максимальную яркость attenuation
+		maxAttenuation := math.Max(attenuation.x, math.Max(attenuation.y, attenuation.z))
+		if maxAttenuation < 1e-6 {
+			return emitted
+		}
+
+		// Вероятность продолжения пути (чем меньше яркость, тем меньше вероятность продолжения)
+		rrProb := math.Min(maxAttenuation, 0.95) // ограничиваем максимум 95%
+		if rng.Float64() > rrProb {
+			return emitted
+		}
+
+		// Компенсируем вероятность в attenuation (важно для unbiased рендеринга)
+		attenuation.x /= rrProb
+		attenuation.y /= rrProb
+		attenuation.z /= rrProb
+	}
+
 	// Создаём новый rec для рекурсивного вызова, чтобы избежать перезаписи
 	var nextRec hitRecord
 	// Оптимизация: вычисляем attenuation * rayColorOpt напрямую

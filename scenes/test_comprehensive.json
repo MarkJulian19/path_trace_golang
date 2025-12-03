@@ -339,7 +339,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "wall-white",
@@ -348,7 +349,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "wall-gray",
@@ -357,7 +359,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-red",
@@ -366,7 +369,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-green",
@@ -375,7 +379,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-blue",
@@ -384,7 +389,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-yellow",
@@ -393,7 +399,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-cyan",
@@ -402,7 +409,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-magenta",
@@ -411,7 +419,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "lambert-orange",
@@ -420,7 +429,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-rough-copper",
@@ -429,7 +439,8 @@
       "rough": 0.4,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-smooth-gold",
@@ -438,7 +449,8 @@
       "rough": 0.05,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-medium-silver",
@@ -447,7 +459,8 @@
       "rough": 0.2,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-chrome",
@@ -456,7 +469,8 @@
       "rough": 0.01,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-bronze",
@@ -465,7 +479,8 @@
       "rough": 0.3,
       "ior": 1,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "metal-iron",
@@ -483,34 +498,38 @@
       "rough": 0,
       "ior": 1.5,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "glass-tinted-blue",
       "type": "dielectric",
-      "albedo": { "r": 0.7, "g": 0.8, "b": 1.0 },
+      "albedo": { "r": 1.0, "g": 1.0, "b": 1.0 },
       "rough": 0,
       "ior": 1.5,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0.0, "g": 0.0, "b": 0.3 }
     },
     {
       "id": "glass-tinted-green",
       "type": "dielectric",
-      "albedo": { "r": 0.7, "g": 1.0, "b": 0.8 },
+      "albedo": { "r": 1.0, "g": 1.0, "b": 1.0 },
       "rough": 0,
       "ior": 1.5,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0.0, "g": 0.2, "b": 0.0 }
     },
     {
       "id": "glass-tinted-red",
       "type": "dielectric",
-      "albedo": { "r": 1.0, "g": 0.7, "b": 0.7 },
+      "albedo": { "r": 1.0, "g": 1.0, "b": 1.0 },
       "rough": 0,
       "ior": 1.5,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0.3, "g": 0.0, "b": 0.0 }
     },
     {
       "id": "glass-diamond",
@@ -519,7 +538,8 @@
       "rough": 0,
       "ior": 2.4,
       "emit": { "r": 0, "g": 0, "b": 0 },
-      "power": 0
+      "power": 0,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "mirror-perfect",
@@ -537,7 +557,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 1.0, "g": 1.0, "b": 1.0 },
-      "power": 3
+      "power": 3,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "light-red",
@@ -546,7 +567,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 1.0, "g": 0.0, "b": 0.0 },
-      "power": 3
+      "power": 3,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "light-green",
@@ -555,7 +577,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 0.0, "g": 1.0, "b": 0.0 },
-      "power": 3
+      "power": 3,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     },
     {
       "id": "light-blue",
@@ -573,7 +596,8 @@
       "rough": 0,
       "ior": 1,
       "emit": { "r": 1.0, "g": 1.0, "b": 1.0 },
-      "power": 3
+      "power": 3,
+      "absorption": { "r": 0, "g": 0, "b": 0 }
     }
   ],
   "settings": {

@@ -48,11 +48,15 @@ type Material struct {
 	Type MaterialType `json:"type"`
 
 	Albedo Color   `json:"albedo"`
-	Rough  float64 `json:"rough"` // for metal
+	Rough  float64 `json:"rough"` // for metal and lambert (roughness)
 	IOR    float64 `json:"ior"`   // for dielectric
 
 	Emit Color   `json:"emit"`  // emissive color
 	Power float64`json:"power"` // emissive intensity multiplier
+	
+	// Absorption for dielectric materials (color tinting through glass)
+	// Higher values mean more absorption (darker color)
+	Absorption Color `json:"absorption"` // for dielectric (default: 0,0,0 = no absorption)
 }
 
 // ObjectType enumerates supported geometric primitives.
