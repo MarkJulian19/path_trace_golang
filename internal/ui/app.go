@@ -19,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/user/pathtracer/internal/engine"
+	"github.com/user/pathtracer/internal/engine/gpu"
 	"github.com/user/pathtracer/internal/scene"
 )
 
@@ -119,6 +120,16 @@ func Run(scenePath, mode string) error {
 		camControlActive = b
 	})
 
+	// Параметры GPU-денойзера (управляются из UI).
+	denoiseEnabled := true
+	denoiseSigmaS := 1.0
+	denoiseSigmaR := 0.15
+
+	// Параметры дополнительного сглаживания (сильный blur).
+	smoothEnabled := false
+	smoothRadius := 2
+	smoothStrength := 0.5
+
 	// Внутренняя функция, которая выполняет реальный рендеринг
 	doRender := func(final bool) {
 		go func() {
@@ -167,6 +178,13 @@ func Run(scenePath, mode string) error {
 					}
 					imgCanvas.Refresh()
 				}
+			}
+
+			// Перед запуском рендера обновляем настройки GPU-денойзинга и сглаживания,
+			// чтобы изменения из UI сразу применялись.
+			if engine.GetBackend() == engine.BackendGPU {
+				gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+				gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
 			}
 
 			engine.RenderInto(sc, cfg, img, progress)
@@ -243,6 +261,25 @@ func Run(scenePath, mode string) error {
 
 		// Для final рендеринга запускаем сразу
 		doRender(true)
+	}
+
+	// Backend slider: 0 = CPU, 1 = GPU
+	backendSlider := widget.NewSlider(0, 1)
+	backendSlider.Step = 1
+	backendSlider.Value = 0 // default: CPU
+	backendLabel := widget.NewLabel("Backend: CPU")
+	backendSlider.OnChanged = func(v float64) {
+		if v >= 0.5 {
+			backendLabel.SetText("Backend: GPU")
+			engine.SetBackend(engine.BackendGPU)
+			// При переключении на GPU сразу применяем текущие настройки денойзера.
+			gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+			gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+		} else {
+			backendLabel.SetText("Backend: CPU")
+			engine.SetBackend(engine.BackendCPU)
+		}
+		startRender(false)
 	}
 
 	// --- Управление камерой ---
@@ -658,6 +695,106 @@ func Run(scenePath, mode string) error {
 	finalSpp := widget.NewEntry()
 	finalDepth := widget.NewEntry()
 
+	// --- Настройки тумана (Fog) для сцены ---
+	var fogDensityEntry *widget.Entry
+	var fogColorREntry *widget.Entry
+	var fogColorGEntry *widget.Entry
+	var fogColorBEntry *widget.Entry
+	var fogScatterEntry *widget.Entry
+	var fogAffectSkyCheck *widget.Check
+	var fogEnabledCheck *widget.Check
+	var fogSigmaSEntry *widget.Entry
+	var fogSigmaAEntry *widget.Entry
+	var fogGEntry *widget.Entry
+	var fogHeteroStrengthEntry *widget.Entry
+	var fogNoiseScaleEntry *widget.Entry
+	var fogNoiseOctavesEntry *widget.Entry
+	var fogGpuVolumetricCheck *widget.Check
+
+	initFogControls := func() {
+		fogDensityEntry = widget.NewEntry()
+		fogColorREntry = widget.NewEntry()
+		fogColorGEntry = widget.NewEntry()
+		fogColorBEntry = widget.NewEntry()
+		fogScatterEntry = widget.NewEntry()
+		fogSigmaSEntry = widget.NewEntry()
+		fogSigmaAEntry = widget.NewEntry()
+		fogGEntry = widget.NewEntry()
+		fogHeteroStrengthEntry = widget.NewEntry()
+		fogNoiseScaleEntry = widget.NewEntry()
+		fogNoiseOctavesEntry = widget.NewEntry()
+		fogAffectSkyCheck = widget.NewCheck("Affect sky", func(b bool) {})
+		fogEnabledCheck = widget.NewCheck("Enable fog (GPU only)", func(b bool) {})
+		fogGpuVolumetricCheck = widget.NewCheck("Volumetric scattering (GPU only)", func(b bool) {})
+
+		if sc.Fog != nil {
+			// Включаем флаг, если есть плотность или физические коэффициенты.
+			if sc.Fog.Density > 0 || sc.Fog.SigmaS > 0 || sc.Fog.SigmaA > 0 {
+				fogEnabledCheck.SetChecked(true)
+			} else {
+				fogEnabledCheck.SetChecked(false)
+			}
+
+			fogDensityEntry.SetText(fmt.Sprintf("%.3f", sc.Fog.Density))
+			fogColorREntry.SetText(fmt.Sprintf("%.2f", sc.Fog.Color.R))
+			fogColorGEntry.SetText(fmt.Sprintf("%.2f", sc.Fog.Color.G))
+			fogColorBEntry.SetText(fmt.Sprintf("%.2f", sc.Fog.Color.B))
+			if sc.Fog.Scatter > 0 {
+				fogScatterEntry.SetText(fmt.Sprintf("%.2f", sc.Fog.Scatter))
+			} else {
+				fogScatterEntry.SetText("1.0")
+			}
+
+			// Физические параметры объёмного тумана.
+			if sc.Fog.SigmaS > 0 {
+				fogSigmaSEntry.SetText(fmt.Sprintf("%.3f", sc.Fog.SigmaS))
+			} else {
+				fogSigmaSEntry.SetText("0.5")
+			}
+			if sc.Fog.SigmaA > 0 {
+				fogSigmaAEntry.SetText(fmt.Sprintf("%.3f", sc.Fog.SigmaA))
+			} else {
+				fogSigmaAEntry.SetText("0.1")
+			}
+			fogGEntry.SetText(fmt.Sprintf("%.2f", sc.Fog.G))
+
+			if sc.Fog.HeteroStrength > 0 {
+				fogHeteroStrengthEntry.SetText(fmt.Sprintf("%.2f", sc.Fog.HeteroStrength))
+			} else {
+				fogHeteroStrengthEntry.SetText("0.0")
+			}
+			if sc.Fog.NoiseScale > 0 {
+				fogNoiseScaleEntry.SetText(fmt.Sprintf("%.2f", sc.Fog.NoiseScale))
+			} else {
+				fogNoiseScaleEntry.SetText("3.0")
+			}
+			if sc.Fog.NoiseOctaves > 0 {
+				fogNoiseOctavesEntry.SetText(strconv.Itoa(sc.Fog.NoiseOctaves))
+			} else {
+				fogNoiseOctavesEntry.SetText("3")
+			}
+
+			fogAffectSkyCheck.SetChecked(sc.Fog.AffectSky)
+			fogGpuVolumetricCheck.SetChecked(sc.Fog.GPUVolumetric)
+		} else {
+			fogEnabledCheck.SetChecked(false)
+			fogDensityEntry.SetText("0.0")
+			fogColorREntry.SetText("0.8")
+			fogColorGEntry.SetText("0.8")
+			fogColorBEntry.SetText("0.8")
+			fogScatterEntry.SetText("1.0")
+			fogSigmaSEntry.SetText("0.5")
+			fogSigmaAEntry.SetText("0.1")
+			fogGEntry.SetText("0.6")
+			fogHeteroStrengthEntry.SetText("0.0")
+			fogNoiseScaleEntry.SetText("3.0")
+			fogNoiseOctavesEntry.SetText("3")
+			fogAffectSkyCheck.SetChecked(false)
+			fogGpuVolumetricCheck.SetChecked(true)
+		}
+	}
+	initFogControls()
+
 	prevW.SetText(strconv.Itoa(previewSettings.Width))
 	prevH.SetText(strconv.Itoa(previewSettings.Height))
 	prevSpp.SetText(strconv.Itoa(previewSettings.SamplesPerPx))
@@ -703,6 +840,82 @@ func Run(scenePath, mode string) error {
 			mu.Lock()
 			lastFinalImage = nil
 			mu.Unlock()
+		}
+
+		// Обновляем параметры тумана сцены (используется GPU path tracer).
+		parseF := func(e *widget.Entry, def float64) float64 {
+			v, err := strconv.ParseFloat(e.Text, 64)
+			if err != nil {
+				return def
+			}
+			return v
+		}
+		if fogEnabledCheck.Checked {
+			density := parseF(fogDensityEntry, 0.0)
+			if density < 0 {
+				density = 0
+			}
+			colR := parseF(fogColorREntry, 0.8)
+			colG := parseF(fogColorGEntry, 0.8)
+			colB := parseF(fogColorBEntry, 0.8)
+			scatter := parseF(fogScatterEntry, 1.0)
+			if scatter < 0 {
+				scatter = 0
+			}
+			if scatter > 1 {
+				scatter = 1
+			}
+
+			sigmaS := parseF(fogSigmaSEntry, 0.0)
+			if sigmaS < 0 {
+				sigmaS = 0
+			}
+			sigmaA := parseF(fogSigmaAEntry, 0.0)
+			if sigmaA < 0 {
+				sigmaA = 0
+			}
+			gVal := parseF(fogGEntry, 0.0)
+			if gVal < -0.9 {
+				gVal = -0.9
+			}
+			if gVal > 0.9 {
+				gVal = 0.9
+			}
+			hetero := parseF(fogHeteroStrengthEntry, 0.0)
+			if hetero < 0 {
+				hetero = 0
+			}
+			if hetero > 1 {
+				hetero = 1
+			}
+			noiseScale := parseF(fogNoiseScaleEntry, 3.0)
+			if noiseScale <= 0 {
+				noiseScale = 3.0
+			}
+			noiseOct := parseI(fogNoiseOctavesEntry, 3)
+			if noiseOct < 1 {
+				noiseOct = 1
+			}
+			if noiseOct > 5 {
+				noiseOct = 5
+			}
+
+			if sc.Fog == nil {
+				sc.Fog = &scene.Fog{}
+			}
+			sc.Fog.Density = density
+			sc.Fog.Color = scene.Color{R: colR, G: colG, B: colB}
+			sc.Fog.Scatter = scatter
+			sc.Fog.AffectSky = fogAffectSkyCheck.Checked
+			sc.Fog.SigmaS = sigmaS
+			sc.Fog.SigmaA = sigmaA
+			sc.Fog.G = gVal
+			sc.Fog.HeteroStrength = hetero
+			sc.Fog.NoiseScale = noiseScale
+			sc.Fog.NoiseOctaves = noiseOct
+			sc.Fog.GPUVolumetric = fogGpuVolumetricCheck.Checked
+		} else {
+			sc.Fog = nil
 		}
 
 		// настраиваем отображаемый размер предпросмотра (в пикселях окна)
@@ -754,6 +967,25 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Samples"), finalSpp,
 			widget.NewLabel("Max depth"), finalDepth,
 		),
+		widget.NewLabel("Fog (GPU)"),
+		fogEnabledCheck,
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Density"), fogDensityEntry,
+			widget.NewLabel("Scatter"), fogScatterEntry,
+			widget.NewLabel("Color R"), fogColorREntry,
+			widget.NewLabel("Color G"), fogColorGEntry,
+			widget.NewLabel("Color B"), fogColorBEntry,
+		),
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Sigma S"), fogSigmaSEntry,
+			widget.NewLabel("Sigma A"), fogSigmaAEntry,
+			widget.NewLabel("g (anisotropy)"), fogGEntry,
+			widget.NewLabel("Hetero strength"), fogHeteroStrengthEntry,
+			widget.NewLabel("Noise scale"), fogNoiseScaleEntry,
+			widget.NewLabel("Noise octaves"), fogNoiseOctavesEntry,
+		),
+		fogAffectSkyCheck,
+		fogGpuVolumetricCheck,
 		applySettings,
 	)
 
@@ -799,9 +1031,118 @@ func Run(scenePath, mode string) error {
 		}()
 	})
 
+	// --- GPU denoise controls (видны и полезны в режиме GPU) ---
+	denoiseCheck := widget.NewCheck("GPU denoise (bilateral 3x3)", func(b bool) {
+		denoiseEnabled = b
+		if engine.GetBackend() == engine.BackendGPU {
+			gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+			startRender(false)
+		}
+	})
+	denoiseCheck.SetChecked(denoiseEnabled)
+
+	denoiseSigmaSEntry := widget.NewEntry()
+	denoiseSigmaSEntry.SetText(fmt.Sprintf("%.2f", denoiseSigmaS))
+	denoiseSigmaREntry := widget.NewEntry()
+	denoiseSigmaREntry.SetText(fmt.Sprintf("%.2f", denoiseSigmaR))
+
+	applyDenoiseBtn := widget.NewButton("Apply GPU denoise", func() {
+		parseF := func(e *widget.Entry, def float64) float64 {
+			v, err := strconv.ParseFloat(e.Text, 64)
+			if err != nil || v <= 0 {
+				return def
+			}
+			return v
+		}
+		denoiseSigmaS = parseF(denoiseSigmaSEntry, denoiseSigmaS)
+		denoiseSigmaR = parseF(denoiseSigmaREntry, denoiseSigmaR)
+		if engine.GetBackend() == engine.BackendGPU {
+			gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+			startRender(false)
+		}
+	})
+
+	denoiseBox := container.NewVBox(
+		widget.NewLabel("GPU denoise"),
+		denoiseCheck,
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Sigma S (space)"), denoiseSigmaSEntry,
+			widget.NewLabel("Sigma R (color)"), denoiseSigmaREntry,
+		),
+		applyDenoiseBtn,
+	)
+
+	// Дополнительный фильтр сглаживания (сильный blur).
+	smoothCheck := widget.NewCheck("GPU extra smoothing (strong blur)", func(b bool) {
+		smoothEnabled = b
+		if engine.GetBackend() == engine.BackendGPU {
+			gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+			startRender(false)
+		}
+	})
+	smoothCheck.SetChecked(smoothEnabled)
+
+	smoothRadiusEntry := widget.NewEntry()
+	smoothRadiusEntry.SetText(strconv.Itoa(smoothRadius))
+	smoothStrengthEntry := widget.NewEntry()
+	smoothStrengthEntry.SetText(fmt.Sprintf("%.2f", smoothStrength))
+
+	applySmoothBtn := widget.NewButton("Apply smoothing", func() {
+		parseI := func(e *widget.Entry, def int) int {
+			v, err := strconv.Atoi(e.Text)
+			if err != nil {
+				return def
+			}
+			return v
+		}
+		parseF := func(e *widget.Entry, def float64) float64 {
+			v, err := strconv.ParseFloat(e.Text, 64)
+			if err != nil {
+				return def
+			}
+			return v
+		}
+		smoothRadius = parseI(smoothRadiusEntry, smoothRadius)
+		if smoothRadius < 1 {
+			smoothRadius = 1
+		}
+		if smoothRadius > 5 {
+			smoothRadius = 5
+		}
+		smoothStrength = parseF(smoothStrengthEntry, smoothStrength)
+		if smoothStrength < 0 {
+			smoothStrength = 0
+		}
+		if smoothStrength > 1 {
+			smoothStrength = 1
+		}
+
+		if engine.GetBackend() == engine.BackendGPU {
+			gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+			startRender(false)
+		}
+	})
+
+	smoothBox := container.NewVBox(
+		widget.NewLabel("GPU extra smoothing"),
+		smoothCheck,
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Radius (1-5)"), smoothRadiusEntry,
+			widget.NewLabel("Strength (0-1)"), smoothStrengthEntry,
+		),
+		applySmoothBtn,
+	)
+
 	controls := container.NewVBox(
 		widget.NewLabel("Controls"),
 		liveUpdate,
+		container.NewVBox(
+			widget.NewLabel("Compute backend"),
+			backendLabel,
+			backendSlider,
+		),
+		denoiseBox,
+		smoothBox,
 		camControlCheck,
 		container.NewHBox(previewBtn, finalBtn),
 		container.NewGridWithColumns(2,

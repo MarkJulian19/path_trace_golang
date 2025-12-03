@@ -88,6 +88,44 @@ type RenderSettings struct {
 	MaxDepth     int `json:"max_depth"`
 }
 
+// Fog описывает туман / участвующую среду.
+// Новый объёмный туман используется только в GPU-рендере, CPU по‑прежнему игнорирует эти поля.
+type Fog struct {
+	// Простой параметр плотности для обратной совместимости.
+	// Если заданы SigmaS/SigmaA, то Density рассматривается как базовая экстинкция и может быть 0.
+	Density float64 `json:"density"` // 0 = нет тумана, >0 = базовая экстинкция
+
+	// Базовый цвет тумана/лучей.
+	Color Color `json:"color"` // базовый цвет тумана/лучей
+
+	// Насколько сильно туман рассеивает свет в сторону камеры (0..1).
+	// При 0 — чистое поглощение, при 1 — сильные видимые лучи. Используется как множитель для SigmaS.
+	Scatter float64 `json:"scatter"`
+
+	// Физические коэффициенты объёмной среды (опционально).
+	// Если оба равны 0, они будут выведены из Density/Scatter.
+	// sigma_t = sigma_a + sigma_s определяет общее затухание вдоль луча.
+	SigmaS float64 `json:"sigma_s"` // коэффициент рассеяния
+	SigmaA float64 `json:"sigma_a"` // коэффициент поглощения
+
+	// Анизотропия фазовой функции Хеньи–Грина (−0.9..0.9).
+	// g > 0 даёт направленные лучи от источников (god rays), g < 0 — обратное рассеяние.
+	G float64 `json:"g"`
+
+	// Параметры неоднородного (шумового) тумана.
+	// Если HeteroStrength = 0, туман считается однородным.
+	HeteroStrength float64 `json:"hetero_strength"` // 0..1, сила модификации плотности шумом
+	NoiseScale     float64 `json:"noise_scale"`     // базовая частота шума (меньше = более крупные «облака»)
+	NoiseOctaves   int     `json:"noise_octaves"`   // количество октав фрактального шума (1..5)
+
+	// Влияет ли туман на фон/небо. Если false, sky почти не глушится.
+	AffectSky bool `json:"affect_sky"`
+
+	// Включение нового физически‑реалистичного объёмного тумана только для GPU.
+	// Если false, GPU может использовать упрощённую модель или полностью выключить объёмный туман.
+	GPUVolumetric bool `json:"gpu_volumetric"`
+}
+
 // Sky describes sky/environment settings.
 type Sky struct {
 	Type      string  `json:"type"`      // "solid" or "gradient"
@@ -106,6 +144,9 @@ type Scene struct {
 
 	Background Color `json:"background"` // deprecated, use Sky instead
 	Sky        *Sky  `json:"sky"`        // new sky system
+
+	// Необязательный однородный туман для GPU path tracer.
+	Fog *Fog `json:"fog,omitempty"`
 }
 
 // ToImageColor converts linear Color to sRGB image color.

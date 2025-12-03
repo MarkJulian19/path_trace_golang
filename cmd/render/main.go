@@ -16,11 +16,18 @@ func main() {
 
 	scenePath := flag.String("scene", "scenes/example_simple.json", "path to scene JSON file")
 	mode := flag.String("mode", "preview", "render mode: preview or final")
+	useGPU := flag.Bool("gpu", false, "use GPU backend for rendering (if available)")
 	headless := flag.Bool("headless", false, "render without UI and save PNG")
 	output := flag.String("out", "output.png", "output PNG file for headless render")
 
 	flag.Parse()
 	log.Printf("flags: scene=%s mode=%s headless=%v out=%s\n", *scenePath, *mode, *headless, *output)
+
+	if *useGPU {
+		engine.SetBackend(engine.BackendGPU)
+	} else {
+		engine.SetBackend(engine.BackendCPU)
+	}
 
 	if *headless {
 		if err := renderHeadless(*scenePath, *mode, *output); err != nil {

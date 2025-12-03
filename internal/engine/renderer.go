@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/user/pathtracer/internal/engine/gpu"
 	"github.com/user/pathtracer/internal/scene"
 )
 
@@ -30,6 +31,16 @@ func Render(sc *scene.Scene, cfg RenderConfig) image.Image {
 // If progress is not nil, it will be called periodically from worker goroutines
 // after finishing a row to allow interactive preview.
 func RenderInto(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
+	switch GetBackend() {
+	case BackendGPU:
+		renderIntoGPU(sc, cfg, img, progress)
+	default:
+		renderIntoCPU(sc, cfg, img, progress)
+	}
+}
+
+// renderIntoCPU contains the original CPU implementation.
+func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
 	b := img.Bounds()
 	if b.Dx() != cfg.Width || b.Dy() != cfg.Height {
 		// basic safety: resize not supported, just return
@@ -228,6 +239,23 @@ func RenderInto(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress fun
 	// Финальное обновление предпросмотра после завершения рендеринга
 	if progress != nil {
 		progress()
+	}
+}
+
+// renderIntoGPU is a placeholder that currently falls back to CPU implementation.
+// This keeps behaviour safe while allowing the UI / CLI to switch backends.
+// For now it executes a simple GPU compute shader that renders a gradient.
+// If GPU path fails for any reason, it falls back to CPU renderer.
+func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
+	gpuCfg := gpu.RenderConfig{
+		Width:        cfg.Width,
+		Height:       cfg.Height,
+		SamplesPerPx: cfg.SamplesPerPx,
+		MaxDepth:     cfg.MaxDepth,
+	}
+	if err := gpu.Render(sc, gpuCfg, img, progress); err != nil {
+		// Если что-то пошло не так с OpenGL/GLFW, безопасно рендерим на CPU.
+		renderIntoCPU(sc, cfg, img, progress)
 	}
 }
 

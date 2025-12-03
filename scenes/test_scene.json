@@ -900,10 +900,10 @@
     }
   ],
   "settings": {
-    "width": 800,
-    "height": 450,
-    "samples_per_px": 50,
-    "max_depth": 30
+    "width": 1920,
+    "height": 1080,
+    "samples_per_px": 1,
+    "max_depth": 10
   },
   "background": {
     "r": 0.2,
@@ -913,19 +913,36 @@
   "sky": {
     "type": "gradient",
     "color": {
-      "r": 0,
-      "g": 0,
-      "b": 0
+      "r": 0.2,
+      "g": 0.3,
+      "b": 0.5
     },
     "horizon": {
-      "r": 0.0,
-      "g": 0.0,
-      "b": 0.0
+      "r": 0.2,
+      "g": 0.3,
+      "b": 0.5
     },
     "zenith": {
-      "r": 0.0,
-      "g": 0.0,
-      "b": 0.0
+      "r": 0.2,
+      "g": 0.3,
+      "b": 0.5
     }
+  },
+  "fog": {
+    "density": 0.5,
+    "color": {
+      "r": 0.8,
+      "g": 0.8,
+      "b": 0.8
+    },
+    "scatter": 1,
+    "sigma_s": 0.5,
+    "sigma_a": 0.1,
+    "g": 0.6,
+    "hetero_strength": 0.6,
+    "noise_scale": 3.0,
+    "noise_octaves": 3,
+    "affect_sky": false,
+    "gpu_volumetric": true
   }
 }
