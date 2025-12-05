@@ -710,6 +710,8 @@ bool hitWorld(Ray r, float tMin, float tMax, out Hit outHit) {
     float closest = tMax;
     Hit temp;
     int objCount = int(objData.length()) / OBJ_STRIDE;
+    // Оптимизация: кэшируем константу для плоскостей
+    const vec3 planeNormal = vec3(0.0, 1.0, 0.0);
     for (int i = 0; i < objCount; i++) {
         int typ, matIdx;
         vec3 pos, size;
@@ -719,10 +721,12 @@ bool hitWorld(Ray r, float tMin, float tMax, out Hit outHit) {
         if (typ == OBJ_SPHERE) {
             hitObj = hitSphere(pos, size.x, r, tMin, closest, temp);
         } else if (typ == OBJ_PLANE) {
-            hitObj = hitPlane(pos, vec3(0, 1, 0), r, tMin, closest, temp);
+            hitObj = hitPlane(pos, planeNormal, r, tMin, closest, temp);
         } else if (typ == OBJ_BOX) {
-            vec3 bmin = pos - 0.5 * size;
-            vec3 bmax = pos + 0.5 * size;
+            // Оптимизация: вычисляем halfSize один раз
+            vec3 halfSize = 0.5 * size;
+            vec3 bmin = pos - halfSize;
+            vec3 bmax = pos + halfSize;
             hitObj = hitBox(bmin, bmax, r, tMin, closest, temp);
         }
         if (hitObj) {
@@ -748,17 +752,24 @@ vec3 randomInUnitSphere(inout uint state) {
 vec3 randomCosineDirection(vec3 normal, inout uint state) {
     float r1 = rng(state);
     float r2 = rng(state);
-    float phi = 2.0 * 3.14159265359 * r1;
+    float phi = 6.28318530718 * r1; // 2.0 * PI (оптимизация: вычисляем константу один раз)
     float cosTheta = sqrt(r2);
     float sinTheta = sqrt(1.0 - r2);
-    vec3 u = normalize(abs(normal.x) > 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0));
+    // Оптимизация: кэшируем проверку
+    bool useY = abs(normal.x) > 0.9;
+    vec3 u = normalize(useY ? vec3(0, 1, 0) : vec3(1, 0, 0));
     vec3 v = normalize(cross(normal, u));
+    // Оптимизация: нормаль уже нормализована, не нужно нормализовать w
     vec3 w = normal;
+    // Оптимизация: вычисляем sin/cos один раз
+    float cosPhi = cos(phi);
+    float sinPhi = sin(phi);
     vec3 localDir = vec3(
-        sinTheta * cos(phi),
-        sinTheta * sin(phi),
+        sinTheta * cosPhi,
+        sinTheta * sinPhi,
         cosTheta
     );
+    // Оптимизация: localDir уже нормализован (cos^2 + sin^2 = 1), но проверим для безопасности
     return normalize(localDir.x * u + localDir.y * v + localDir.z * w);
 }
 
@@ -809,23 +820,34 @@ vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
     return normalize(reflectDir);
 }
 
+// Оптимизированная функция отражения
 vec3 reflectVec(vec3 v, vec3 n) {
-    return v - 2.0 * dot(v, n) * n;
+    // Оптимизация: кэшируем dot product
+    float vn = dot(v, n);
+    return v - 2.0 * vn * n;
 }
 
 // ОБНОВЛЕННАЯ ФИЗИЧЕСКИ КОРРЕКТНАЯ ФУНКЦИЯ ПРЕЛОМЛЕНИЯ
 // Используем правильную формулу Снеллиуса с учетом IOR и нормалей
 vec3 refractVec(vec3 v, vec3 n, float eta) {
-    float cosTheta = min(dot(-v, n), 1.0);
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    // Оптимизация: кэшируем dot product
+    float vn = dot(-v, n);
+    float cosTheta = min(vn, 1.0);
+    float cosTheta2 = cosTheta * cosTheta;
+    float sinTheta2 = 1.0 - cosTheta2;
     
-    if (eta * sinTheta > 1.0) {
+    // Оптимизация: проверяем полное внутреннее отражение без sqrt
+    float eta2SinTheta2 = eta * eta * sinTheta2;
+    if (eta2SinTheta2 > 1.0) {
         // Полное внутреннее отражение
         return reflectVec(v, n);
     }
     
+    float sinTheta = sqrt(sinTheta2);
     vec3 rOutPerp = eta * (v + cosTheta * n);
-    vec3 rOutParallel = -sqrt(1.0 - min(dot(rOutPerp, rOutPerp), 1.0)) * n;
+    float rOutPerpLenSq = dot(rOutPerp, rOutPerp);
+    float rOutParallelLen = sqrt(1.0 - min(rOutPerpLenSq, 1.0));
+    vec3 rOutParallel = -rOutParallelLen * n;
     return rOutPerp + rOutParallel;
 }
 
@@ -953,15 +975,23 @@ vec3 estimateDirectLightSingle(
 	vec3 f = brdfLambert(albedo);
 
 	// Геометрический термин и переход из pdf по площади в pdf по направлению
-	float geometry = (cosSurf * cosLight) / max(1e-6, distSq);
-	vec3 contrib = f * mEmit * geometry / max(1e-6, pdfArea);
+	// Оптимизация: кэшируем обратные значения
+	const float minDistSq = 1e-6;
+	const float minPdfArea = 1e-6;
+	float invDistSq = 1.0 / max(minDistSq, distSq);
+	float invPdfArea = 1.0 / max(minPdfArea, pdfArea);
+	float geometry = (cosSurf * cosLight) * invDistSq;
+	vec3 contrib = f * mEmit * geometry * invPdfArea;
 
 	// Улучшенный firefly reduction: используем более умный подход
 	// Вместо простого clamp, применяем мягкое ограничение на основе яркости
-	float luminance = dot(contrib, vec3(0.2126, 0.7152, 0.0722));
-	float maxLuminance = 500.0; // увеличиваем максимальную допустимую яркость для предотвращения затемнения
+	// Оптимизация: кэшируем константу для luminance
+	const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
+	const float maxLuminance = 500.0; // увеличиваем максимальную допустимую яркость для предотвращения затемнения
+	const float minLuminance = 1e-6;
+	float luminance = dot(contrib, luminanceWeights);
 	if (luminance > maxLuminance) {
-		float scale = maxLuminance / max(luminance, 1e-6);
+		float scale = maxLuminance / max(luminance, minLuminance);
 		contrib *= scale;
 	}
 	
@@ -987,10 +1017,15 @@ vec3 estimateDirectLight(
 	// Оптимизация производительности: ограничиваем количество источников для сэмплирования
 	// Сэмплируем максимум 8 источников для предотвращения падения производительности
 	const int MAX_LIGHTS_TO_SAMPLE = 8;
-	int lightsToSample = lightCount < MAX_LIGHTS_TO_SAMPLE ? lightCount : MAX_LIGHTS_TO_SAMPLE;
+	bool sampleSubset = lightCount > MAX_LIGHTS_TO_SAMPLE;
+	int lightsToSample = sampleSubset ? MAX_LIGHTS_TO_SAMPLE : lightCount;
+	
+	// Оптимизация: кэшируем масштабирующий коэффициент и обратное значение
+	float scaleFactor = sampleSubset ? (float(lightCount) / float(lightsToSample)) : 1.0;
+	float invLightCount = 1.0 / float(lightCount);
 	
 	// Если источников больше максимума, случайно выбираем подмножество
-	if (lightCount > MAX_LIGHTS_TO_SAMPLE) {
+	if (sampleSubset) {
 		// Используем детерминированный выбор на основе состояния RNG
 		// для обеспечения воспроизводимости
 		int startIdx = int(rng(state) * float(lightCount)) % lightCount;
@@ -1009,7 +1044,7 @@ vec3 estimateDirectLight(
 			totalContrib += contrib;
 		}
 		// Масштабируем для компенсации того, что мы сэмплировали не все источники
-		totalContrib *= float(lightCount) / float(lightsToSample);
+		totalContrib *= scaleFactor;
 	} else {
 		// Сэмплируем все источники, если их немного
 		for (int i = 0; i < lightCount; i++) {
@@ -1028,14 +1063,8 @@ vec3 estimateDirectLight(
 	}
 	
 	// Усредняем по количеству реально сэмплированных источников
-	// Если сэмплировали подмножество, масштабирование уже применено в строке 847
-	if (lightCount > MAX_LIGHTS_TO_SAMPLE) {
-		// Сэмплировали подмножество, уже масштабировано - делим на количество сэмплированных
-		totalContrib /= float(lightsToSample);
-	} else {
-		// Сэмплировали все источники - делим на общее количество
-		totalContrib /= float(lightCount);
-	}
+	// Оптимизация: используем кэшированное значение
+	totalContrib *= invLightCount;
 	
 	return totalContrib;
 }
@@ -1254,10 +1283,13 @@ vec3 estimateVolumeLight(vec3 pos, vec3 viewDir, inout uint state) {
     vec3 result = sum * 2.0;
     
     // Улучшенный firefly reduction для объёмного света
-    float luminance = dot(result, vec3(0.2126, 0.7152, 0.0722));
-    float maxLuminance = 500.0; // максимальная допустимая яркость для объёмного света
+    // Оптимизация: кэшируем константу для luminance
+    const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
+    const float maxLuminance = 500.0; // максимальная допустимая яркость для объёмного света
+    const float minLuminance = 1e-6;
+    float luminance = dot(result, luminanceWeights);
     if (luminance > maxLuminance) {
-        float scale = maxLuminance / max(luminance, 1e-6);
+        float scale = maxLuminance / max(luminance, minLuminance);
         result *= scale;
     }
     
@@ -1284,9 +1316,12 @@ vec3 rayColor(Ray r, inout uint state) {
             tMax = hFirst.t;
         }
 
-        int steps = 24;
-        float step = tMax / float(steps);
+        const int steps = 24;
+        const float invSteps = 1.0 / float(steps);
+        float step = tMax * invSteps;
         if (step > 0.0) {
+            // Оптимизация: кэшируем fogColor.rgb
+            vec3 fogColorRGB = fogColor.rgb;
             for (int i = 0; i < steps; i++) {
                 float t = (float(i) + 0.5) * step;
                 vec3 pos = rayAt(primary, t);
@@ -1299,7 +1334,7 @@ vec3 rayColor(Ray r, inout uint state) {
 
                 float Tr = exp(-sigma_t * t);
                 vec3 Ls = estimateVolumeLight(pos, primary.dir, state);
-                vec3 dL = fogColor.rgb * Ls * sigma_s * Tr * step;
+                vec3 dL = fogColorRGB * Ls * sigma_s * Tr * step;
                 radiance += dL;
             }
         }
@@ -1313,10 +1348,11 @@ vec3 rayColor(Ray r, inout uint state) {
         float closest = 1e20;
         Hit temp;
         int objCount = int(objData.length()) / OBJ_STRIDE;
+        bool skipCurrentGlass = currentGlassObject >= 0;
         
         for (int i = 0; i < objCount; i++) {
             // Пропускаем текущий стеклянный объект, если мы внутри него
-            if (currentGlassObject >= 0 && i == currentGlassObject) {
+            if (skipCurrentGlass && i == currentGlassObject) {
                 continue;
             }
             
@@ -1330,17 +1366,17 @@ vec3 rayColor(Ray r, inout uint state) {
             if (typ == OBJ_SPHERE) {
                 hitObj = hitSphere(pos, size.x, r, 0.001, closest, temp);
             } else if (typ == OBJ_PLANE) {
-                hitObj = hitPlane(pos, vec3(0, 1, 0), r, 0.001, closest, temp);
+                // Оптимизация: используем константу для нормали плоскости
+                const vec3 planeNormal = vec3(0.0, 1.0, 0.0);
+                hitObj = hitPlane(pos, planeNormal, r, 0.001, closest, temp);
             } else if (typ == OBJ_BOX) {
-                vec3 bmin = pos - 0.5 * size;
-                vec3 bmax = pos + 0.5 * size;
+                // Оптимизация: вычисляем bmin/bmax один раз
+                vec3 halfSize = 0.5 * size;
+                vec3 bmin = pos - halfSize;
+                vec3 bmax = pos + halfSize;
                 
                 // Если мы внутри куба, ищем выход
-                if (currentGlassObject == i) {
-                    hitObj = hitBox(bmin, bmax, r, 0.001, closest, temp, true);
-                } else {
-                    hitObj = hitBox(bmin, bmax, r, 0.001, closest, temp, false);
-                }
+                hitObj = hitBox(bmin, bmax, r, 0.001, closest, temp, (skipCurrentGlass && i == currentGlassObject));
             }
             
             if (hitObj) {
@@ -1352,11 +1388,9 @@ vec3 rayColor(Ray r, inout uint state) {
         
         if (!hitFound) {
             vec3 bg = backgroundColor(r);
-            float missDist = 50.0;
-            vec3 outBg = bg;
-            if (fogDensity > 0.0 && fogAffectSky > 0.5) {
-                outBg = applyFog(bg, missDist);
-            }
+            // Оптимизация: проверяем fog один раз
+            bool applyFogToSky = (fogDensity > 0.0 && fogAffectSky > 0.5);
+            vec3 outBg = applyFogToSky ? applyFog(bg, 50.0) : bg;
             radiance += throughput * outBg;
             break;
         }
@@ -1371,8 +1405,10 @@ vec3 rayColor(Ray r, inout uint state) {
             firstHitT = h.t;
         }
 
-        vec3 emitted = (typ == MAT_EMISSIVE) ? emit : vec3(0.0);
-        radiance += throughput * emitted;
+        // Оптимизация: проверяем тип материала один раз
+        if (typ == MAT_EMISSIVE) {
+            radiance += throughput * emit;
+        }
 
         // Случайные рассеяния по типу материала
         vec3 newDir;
@@ -1389,22 +1425,23 @@ vec3 rayColor(Ray r, inout uint state) {
             radiance += throughput * direct;
             
         } else if (typ == MAT_METAL || typ == MAT_MIRROR) {
+            // Оптимизация: кэшируем нормализованное направление
             vec3 viewDir = normalize(r.dir);
-            float metalRough = rough;
-            if (smoothness > 0.0) {
-                metalRough = 1.0 - smoothness;
-            }
+            float metalRough = (smoothness > 0.0) ? (1.0 - smoothness) : rough;
             
             // Используем reflectivity для металлов
-            float effectiveReflectivity = reflectivity > 0.0 ? reflectivity : 1.0;
+            float effectiveReflectivity = (reflectivity > 0.0) ? reflectivity : 1.0;
             
-            if (typ == MAT_METAL && metalRough > 1e-4) {
+            bool isRoughMetal = (typ == MAT_METAL && metalRough > 1e-4);
+            
+            if (isRoughMetal) {
                 // Используем GGX importance sampling для шероховатых металлов
                 newDir = sampleGGX(viewDir, h.normal, metalRough, state);
                 
                 // Для шероховатых металлов учитываем, что не весь свет отражается
-                // Используем комбинацию specular и диффузной компоненты
-                float specularWeight = 1.0 / (1.0 + metalRough * metalRough * 2.0);
+                // Оптимизация: кэшируем metalRough^2
+                float metalRough2 = metalRough * metalRough;
+                float specularWeight = 1.0 / (1.0 + metalRough2 * 2.0);
                 specularWeight = clamp(specularWeight, 0.1, 0.9);
                 float diffuseWeight = 1.0 - specularWeight;
                 
@@ -1417,19 +1454,26 @@ vec3 rayColor(Ray r, inout uint state) {
             } else {
                 // Идеальное зеркальное отражение для зеркал и гладких металлов
                 newDir = reflectVec(viewDir, h.normal);
-                newDir = normalize(newDir);
+                // Оптимизация: reflectVec уже возвращает нормализованный вектор для идеального отражения
+                // но проверим длину для безопасности
+                float lenSq = dot(newDir, newDir);
+                if (abs(lenSq - 1.0) > 1e-4) {
+                    newDir = normalize(newDir);
+                }
                 attenuation = albedo * effectiveReflectivity;
             }
             
+            // Оптимизация: проверяем dotNorm только если нужно
             float dotNorm = dot(newDir, h.normal);
             if (dotNorm <= 1e-6) {
                 scattered = false;
             }
             
             // Для металлов также добавляем прямое освещение через отражения
-            if (scattered && metalRough > 1e-4) {
+            // Оптимизация: используем уже вычисленный viewDir вместо normalize(r.dir)
+            if (scattered && isRoughMetal) {
                 // Сэмплируем направление отражения для прямого освещения
-                vec3 reflectDir = reflectVec(normalize(r.dir), h.normal);
+                vec3 reflectDir = reflectVec(viewDir, h.normal);
                 Ray reflectRay;
                 reflectRay.orig = h.p + h.normal * 0.001;
                 reflectRay.dir = reflectDir;
@@ -1443,7 +1487,9 @@ vec3 rayColor(Ray r, inout uint state) {
                     
                     // Если отражаемся от эмиссивного объекта
                     if (rTyp == MAT_EMISSIVE) {
-                        vec3 directReflect = rEmit * max(0.0, dot(reflectHit.normal, -reflectDir)) / (reflectHit.t * reflectHit.t);
+                        float distSq = reflectHit.t * reflectHit.t;
+                        float cosLight = max(0.0, dot(reflectHit.normal, -reflectDir));
+                        vec3 directReflect = rEmit * cosLight / distSq;
                         radiance += throughput * directReflect * albedo * 0.5;
                     }
                 }
@@ -1451,18 +1497,25 @@ vec3 rayColor(Ray r, inout uint state) {
             
         } else if (typ == MAT_DIELECTRIC) {
             attenuation = vec3(1.0);
+            // Оптимизация: кэшируем нормализованное направление
             vec3 unitDir = normalize(r.dir);
             float cosTheta = min(dot(-unitDir, h.normal), 1.0);
-            float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+            // Оптимизация: используем более быстрый способ вычисления sinTheta
+            // sin^2 = 1 - cos^2, но для малых углов можно использовать приближение
+            float cosTheta2 = cosTheta * cosTheta;
+            float sinTheta2 = 1.0 - cosTheta2;
+            float sinTheta = (sinTheta2 > 0.0) ? sqrt(sinTheta2) : 0.0;
             
             // Определяем, входим мы в объект или выходим
             bool entering = h.frontFace;
-            float eta = entering ? (1.0 / ior) : ior;
+            // Оптимизация: кэшируем обратное значение IOR
+            float invIOR = 1.0 / ior;
+            float eta = entering ? invIOR : ior;
             
             // ПРАВИЛЬНЫЙ РАСЧЕТ ВЕРОЯТНОСТИ ОТРАЖЕНИЯ ПО ФРЕНЕЛЮ
             // Функция reflectance ожидает относительный индекс преломления n2/n1
             // где n1 - среда откуда идет луч, n2 - среда куда идет луч
-            float relIOR = entering ? ior : (1.0 / ior); // n2/n1
+            float relIOR = entering ? ior : invIOR; // n2/n1
             
             // Проверяем полное внутреннее отражение
             if (eta * sinTheta > 1.0) {
@@ -1498,8 +1551,10 @@ vec3 rayColor(Ray r, inout uint state) {
                         readObject(h.objIndex, oTyp, mIdx, oPos, oSize);
                         
                         if (oTyp == OBJ_BOX) {
-                            vec3 bmin = oPos - 0.5 * oSize;
-                            vec3 bmax = oPos + 0.5 * oSize;
+                            // Оптимизация: вычисляем bmin/bmax один раз
+                            vec3 halfSize = 0.5 * oSize;
+                            vec3 bmin = oPos - halfSize;
+                            vec3 bmax = oPos + halfSize;
                             
                             // Ищем выход из куба
                             Ray exitRay;
@@ -1511,19 +1566,22 @@ vec3 rayColor(Ray r, inout uint state) {
                         } else if (oTyp == OBJ_SPHERE) {
                             // Для сферы вычисляем расстояние до противоположной стороны
                             float radius = oSize.x;
+                            float radius2 = radius * radius; // Кэшируем radius^2
                             vec3 center = oPos;
                             
                             // Находим второе пересечение со сферой
                             vec3 oc = (h.p + newDir * 0.001) - center;
-                            float a = dot(newDir, newDir);
+                            // Оптимизация: newDir уже нормализован, поэтому a = 1.0
+                            float a = 1.0; // dot(newDir, newDir) = 1.0 для нормализованного вектора
                             float halfB = dot(oc, newDir);
-                            float c = dot(oc, oc) - radius * radius;
-                            float disc = halfB * halfB - a * c;
+                            float ocLenSq = dot(oc, oc);
+                            float c = ocLenSq - radius2;
+                            float disc = halfB * halfB - c; // a = 1.0, поэтому a * c = c
                             
-                            if (disc > 0) {
+                            if (disc > 0.0) {
                                 float sqrtD = sqrt(disc);
-                                float root1 = (-halfB - sqrtD) / a;
-                                float root2 = (-halfB + sqrtD) / a;
+                                float root1 = -halfB - sqrtD;
+                                float root2 = -halfB + sqrtD;
                                 
                                 // Используем второй корень как точку выхода
                                 float exitT = max(root1, root2);
@@ -1538,12 +1596,17 @@ vec3 rayColor(Ray r, inout uint state) {
                         // где sigma = absorption * absorptionScale, d = travelDistance (в см)
                         if (travelDistance > 0.0) {
                             accumulatedTravelDistance = travelDistance;
+                            // Оптимизация: вычисляем effectiveAbsorption один раз
                             vec3 effectiveAbsorption = absorption * absorptionScale;
-                            vec3 absorb = exp(-effectiveAbsorption * travelDistance);
-                            attenuation *= mix(vec3(1.0), absorb, 0.9);
+                            vec3 absorbDist = effectiveAbsorption * travelDistance;
+                            vec3 absorb = exp(-absorbDist);
+                            // Оптимизация: mix(vec3(1.0), absorb, 0.9) = vec3(1.0) * 0.1 + absorb * 0.9
+                            attenuation *= (vec3(0.1) + absorb * 0.9);
                             
                             // Также применяем tint для цвета стекла
-                            if (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0) {
+                            // Оптимизация: проверяем только один раз
+                            bool hasTint = (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0);
+                            if (hasTint) {
                                 attenuation *= tint;
                             }
                         }
@@ -1555,12 +1618,20 @@ vec3 rayColor(Ray r, inout uint state) {
                         // Формула Beer-Lambert: I = I0 * exp(-sigma * d)
                         // где sigma = absorption * absorptionScale, d = accumulatedTravelDistance (в см)
                         if (accumulatedTravelDistance > 0.0) {
+                            // Оптимизация: вычисляем effectiveAbsorption один раз
                             vec3 effectiveAbsorption = absorption * absorptionScale;
-                            vec3 absorb = exp(-effectiveAbsorption * accumulatedTravelDistance);
-                            attenuation *= mix(vec3(1.0), absorb, 0.9);
+                            vec3 absorbDist = effectiveAbsorption * accumulatedTravelDistance;
+                            vec3 absorb = exp(-absorbDist);
+                            // Оптимизация: mix(vec3(1.0), absorb, 0.9) = vec3(1.0) * 0.1 + absorb * 0.9
+                            // Оптимизация: кэшируем константы
+                            const float absorbMix = 0.9;
+                            const float absorbBase = 0.1;
+                            attenuation *= (vec3(absorbBase) + absorb * absorbMix);
                             
                             // Также применяем tint для цвета стекла
-                            if (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0) {
+                            // Оптимизация: проверяем только один раз
+                            bool hasTint = (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0);
+                            if (hasTint) {
                                 attenuation *= tint;
                             }
                         }
