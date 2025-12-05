@@ -211,12 +211,15 @@ type gpuRenderer struct {
 	pbo        uint32
 	matSSBO    uint32
 	objSSBO    uint32
+	lightSSBO  uint32 // SSBO для списка индексов эмиссивных объектов
+	accumSSBO  uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
 	camUBO     uint32
 	skyUBO     uint32
 	fogUBO     uint32
 	width      int
 	height     int
 	// accum содержит накопленные значения цвета в диапазоне [0,1] для каждого пикселя (R,G,B).
+	// Используется только для чтения финального результата, накопление происходит на GPU.
 	accum []float32
 }
 
@@ -274,15 +277,21 @@ func renderWorker() {
 	defer runtime.UnlockOSThread()
 
 	if err := renderer.initGL(); err != nil {
-		// Если не удалось инициализировать GL, отвечаем ошибкой на все запросы.
+		// Если не удалось инициализировать GL, логируем ошибку и отвечаем ошибкой на все запросы.
+		fmt.Fprintf(os.Stderr, "GPU initialization failed: %v\n", err)
 		for req := range renderCh {
 			req.done <- err
 		}
 		return
 	}
 
+	fmt.Fprintf(os.Stderr, "GPU renderer initialized successfully\n")
+
 	for req := range renderCh {
 		err := renderer.renderOnce(req.sc, req.cfg, req.img, req.progress)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "GPU render error: %v\n", err)
+		}
 		req.done <- err
 	}
 }
@@ -324,6 +333,8 @@ func (r *gpuRenderer) initGL() error {
 		gl.GenBuffers(1, &r.pbo)
 		gl.GenBuffers(1, &r.matSSBO)
 		gl.GenBuffers(1, &r.objSSBO)
+		gl.GenBuffers(1, &r.lightSSBO)
+		gl.GenBuffers(1, &r.accumSSBO)
 		gl.GenBuffers(1, &r.camUBO)
 		gl.GenBuffers(1, &r.skyUBO)
 		gl.GenBuffers(1, &r.fogUBO)
@@ -343,6 +354,7 @@ uniform int uHeight;
 uniform int uSamplesPerPx;
 uniform int uMaxDepth;
 uniform uint uFrameSeed;
+uniform int uSampleCount; // Текущее количество накопленных сэмплов
 
 // Камера (совпадает с scene.Camera)
 layout(std140, binding = 1) uniform CameraBlock {
@@ -387,10 +399,11 @@ layout(std140, binding = 5) uniform FogBlock {
 
 // Потоковые массивы материалов и объектов в виде плоских float массивов.
 // Форматы должны совпадать с тем, как мы пакуем данные на Go-стороне.
-// Материал: [typ, rough, ior, pad,
-//            albedo.r, albedo.g, albedo.b, pad,
-//            emit.r, emit.g, emit.b, pad,
-//            absorption.r, absorption.g, absorption.b, pad] (16 float)
+// Материал: [typ, rough, ior, smoothness,
+//            albedo.r, albedo.g, albedo.b, reflectivity,
+//            emit.r, emit.g, emit.b, pad0,
+//            absorption.r, absorption.g, absorption.b, absorption_scale,
+//            tint.r, tint.g, tint.b, pad2] (20 float)
 layout(std430, binding = 3) buffer Materials {
     float matData[];
 };
@@ -400,6 +413,16 @@ layout(std430, binding = 3) buffer Materials {
 //          size.x, size.y, size.z, pad3] (12 float)
 layout(std430, binding = 4) buffer Objects {
     float objData[];
+};
+
+// Список индексов эмиссивных объектов (оптимизация для быстрого доступа к источникам света)
+layout(std430, binding = 6) buffer LightIndicesBlock {
+    int lightIndices[];
+};
+
+// Накопительный буфер для сэмплов (width * height * 3 * float32)
+layout(std430, binding = 7) buffer AccumBuffer {
+    float accumData[];
 };
 
 // Константы: должны совпадать с engine/materials.go и engine/objects.go
@@ -413,7 +436,7 @@ const int OBJ_SPHERE    = 0;
 const int OBJ_PLANE     = 1;
 const int OBJ_BOX       = 2;
 
-const int MAT_STRIDE    = 16;
+const int MAT_STRIDE    = 20;
 const int OBJ_STRIDE    = 12;
 const float PI = 3.14159265359;
 
@@ -444,6 +467,7 @@ struct Hit {
     vec3 normal;
     float t;
     int matIndex;
+    int objIndex;  // Индекс объекта для правильного поиска выхода из стеклянных объектов
     bool frontFace;
 };
 
@@ -464,16 +488,22 @@ void setFaceNormal(Ray r, inout Hit h, vec3 outwardNormal) {
 
 // Чтение материала
 void readMaterial(int idx, out int typ, out float rough, out float ior,
-                  out vec3 albedo, out vec3 emit, out vec3 absorption) {
+                  out vec3 albedo, out vec3 emit, out vec3 absorption,
+                  out float smoothness, out float reflectivity, out vec3 tint,
+                  out float absorptionScale) {
     int base = idx * MAT_STRIDE;
     float ftyp   = matData[base + 0];
     rough        = matData[base + 1];
     ior          = matData[base + 2];
+    smoothness   = matData[base + 3];
     typ          = int(ftyp + 0.5);
 
     albedo = vec3(matData[base + 4], matData[base + 5], matData[base + 6]);
+    reflectivity = matData[base + 7];
     emit   = vec3(matData[base + 8], matData[base + 9], matData[base + 10]);
     absorption = vec3(matData[base + 12], matData[base + 13], matData[base + 14]);
+    absorptionScale = matData[base + 15];
+    tint = vec3(matData[base + 16], matData[base + 17], matData[base + 18]);
 }
 
 // Чтение объекта
@@ -495,7 +525,8 @@ bool hitSphere(vec3 center, float radius, Ray r, float tMin, float tMax, inout H
     float halfB = dot(oc, r.dir);
     float c = dot(oc, oc) - radius * radius;
     float disc = halfB * halfB - a * c;
-    if (disc < 0.0) return false;
+    // Проверка на численную стабильность: касательный луч или численная погрешность
+    if (disc < 1e-8) return false;
     float sqrtD = sqrt(disc);
 
     float root = (-halfB - sqrtD) / a;
@@ -521,36 +552,156 @@ bool hitPlane(vec3 point, vec3 normal, Ray r, float tMin, float tMax, inout Hit 
     return true;
 }
 
-bool hitBox(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, inout Hit h) {
+// Вычисляет нормаль для точки на поверхности куба
+vec3 computeBoxNormal(vec3 localPoint, vec3 halfSize) {
+    // Локальная точка уже относительно центра куба
+    // Нормаль определяется по ближайшей грани
+    
+    // Находим расстояние до каждой из шести граней
+    vec3 distToPositive = halfSize - localPoint;
+    vec3 distToNegative = localPoint + halfSize;
+    
+    // Находим минимальное расстояние
+    float minDist = min(distToPositive.x, min(distToPositive.y, min(distToPositive.z,
+                      min(distToNegative.x, min(distToNegative.y, distToNegative.z)))));
+    
+    // Определяем, к какой грани ближе всего
+    if (abs(minDist - distToPositive.x) < 1e-5) {
+        return vec3(1.0, 0.0, 0.0);
+    } else if (abs(minDist - distToNegative.x) < 1e-5) {
+        return vec3(-1.0, 0.0, 0.0);
+    } else if (abs(minDist - distToPositive.y) < 1e-5) {
+        return vec3(0.0, 1.0, 0.0);
+    } else if (abs(minDist - distToNegative.y) < 1e-5) {
+        return vec3(0.0, -1.0, 0.0);
+    } else if (abs(minDist - distToPositive.z) < 1e-5) {
+        return vec3(0.0, 0.0, 1.0);
+    } else {
+        return vec3(0.0, 0.0, -1.0);
+    }
+}
+
+// Основная функция пересечения с кубом
+// findExit: false = ищем вход (t0), true = ищем выход (t1)
+// УЛУЧШЕННАЯ ФУНКЦИЯ ПЕРЕСЕЧЕНИЯ С КУБОМ
+bool hitBox(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, inout Hit h, bool findExit) {
     float t0 = tMin;
     float t1 = tMax;
+    
     for (int i = 0; i < 3; i++) {
         float invD = 1.0 / (i == 0 ? r.dir.x : (i == 1 ? r.dir.y : r.dir.z));
         float orig = (i == 0 ? r.orig.x : (i == 1 ? r.orig.y : r.orig.z));
         float minV = (i == 0 ? bmin.x : (i == 1 ? bmin.y : bmin.z));
         float maxV = (i == 0 ? bmax.x : (i == 1 ? bmax.y : bmax.z));
+        
         float tNear = (minV - orig) * invD;
         float tFar  = (maxV - orig) * invD;
+        
         if (invD < 0.0) {
             float tmp = tNear; tNear = tFar; tFar = tmp;
         }
-        if (tNear > t0) t0 = tNear;
-        if (tFar  < t1) t1 = tFar;
+        
+        t0 = max(t0, tNear);  // Ближайшее пересечение
+        t1 = min(t1, tFar);   // Дальнее пересечение
+        
         if (t1 <= t0) return false;
     }
-    h.t = t0;
-    h.p = rayAt(r, t0);
-    // Нормаль по ближайшей грани
-    vec3 dMin = h.p - bmin;
-    vec3 dMax = bmax - h.p;
-    float minDist = dMin.x;
-    vec3 n = vec3(-1, 0, 0);
-    if (dMax.x < minDist) { minDist = dMax.x; n = vec3(1, 0, 0); }
-    if (dMin.y < minDist) { minDist = dMin.y; n = vec3(0, -1, 0); }
-    if (dMax.y < minDist) { minDist = dMax.y; n = vec3(0, 1, 0); }
-    if (dMin.z < minDist) { minDist = dMin.z; n = vec3(0, 0, -1); }
-    if (dMax.z < minDist) { n = vec3(0, 0, 1); }
-    setFaceNormal(r, h, n);
+    
+    // Выбираем правильное пересечение
+    h.t = findExit ? t1 : t0;
+    
+    if (h.t < tMin || h.t > tMax) {
+        return false;
+    }
+    
+    h.p = rayAt(r, h.t);
+    
+    // УЛУЧШЕННОЕ ВЫЧИСЛЕНИЕ НОРМАЛИ
+    vec3 center = (bmin + bmax) * 0.5;
+    vec3 halfSize = (bmax - bmin) * 0.5;
+    vec3 localPoint = h.p - center;
+    
+    // Находим ближайшую грань
+    vec3 absLocal = abs(localPoint);
+    float maxDist = max(absLocal.x, max(absLocal.y, absLocal.z));
+    
+    // Определяем нормаль по ближайшей грани
+    vec3 outwardNormal;
+    const float epsilon = 1e-4;
+    
+    if (abs(absLocal.x - halfSize.x) < epsilon) {
+        outwardNormal = vec3(sign(localPoint.x), 0.0, 0.0);
+    } else if (abs(absLocal.y - halfSize.y) < epsilon) {
+        outwardNormal = vec3(0.0, sign(localPoint.y), 0.0);
+    } else {
+        outwardNormal = vec3(0.0, 0.0, sign(localPoint.z));
+    }
+    
+    // Для выхода инвертируем нормаль
+    if (findExit) {
+        outwardNormal = -outwardNormal;
+    }
+    
+    setFaceNormal(r, h, outwardNormal);
+    return true;
+}
+
+// Перегрузка для обратной совместимости (по умолчанию ищем вход)
+bool hitBox(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, inout Hit h) {
+    return hitBox(bmin, bmax, r, tMin, tMax, h, false);
+}
+
+// Функция для получения обоих пересечений (вход и выход)
+bool hitBoxFull(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, 
+                out Hit entry, out Hit exit) {
+    float t0 = tMin;
+    float t1 = tMax;
+    
+    for (int i = 0; i < 3; i++) {
+        float invD = 1.0 / (i == 0 ? r.dir.x : (i == 1 ? r.dir.y : r.dir.z));
+        float orig = (i == 0 ? r.orig.x : (i == 1 ? r.orig.y : r.orig.z));
+        float minV = (i == 0 ? bmin.x : (i == 1 ? bmin.y : bmin.z));
+        float maxV = (i == 0 ? bmax.x : (i == 1 ? bmax.y : bmax.z));
+        
+        float tNear = (minV - orig) * invD;
+        float tFar  = (maxV - orig) * invD;
+        
+        if (invD < 0.0) {
+            float tmp = tNear; tNear = tFar; tFar = tmp;
+        }
+        
+        t0 = max(t0, tNear);
+        t1 = min(t1, tFar);
+        
+        if (t1 <= t0) return false;
+    }
+    
+    if (t0 < tMin || t0 > tMax) return false;
+    if (t1 < tMin || t1 > tMax) return false;
+    
+    // Заполняем точку входа
+    entry.t = t0;
+    entry.p = rayAt(r, t0);
+    
+    // Заполняем точку выхода
+    exit.t = t1;
+    exit.p = rayAt(r, t1);
+    
+    // Вычисляем нормали
+    vec3 center = (bmin + bmax) * 0.5;
+    vec3 halfSize = (bmax - bmin) * 0.5;
+    
+    // Нормаль для входа (направлена наружу)
+    vec3 localEntry = entry.p - center;
+    vec3 entryOutwardNormal = computeBoxNormal(localEntry, halfSize);
+    setFaceNormal(r, entry, entryOutwardNormal);
+    
+    // Нормаль для выхода (направлена внутрь)
+    vec3 localExit = exit.p - center;
+    vec3 exitOutwardNormal = computeBoxNormal(localExit, halfSize);
+    // Для выхода инвертируем нормаль
+    setFaceNormal(r, exit, -exitOutwardNormal);
+    
     return true;
 }
 
@@ -578,6 +729,7 @@ bool hitWorld(Ray r, float tMin, float tMax, out Hit outHit) {
             hitAnything = true;
             closest = temp.t;
             outHit = temp;
+            outHit.objIndex = i;  // Запоминаем индекс объекта для правильного поиска выхода
         }
     }
     return hitAnything;
@@ -610,21 +762,86 @@ vec3 randomCosineDirection(vec3 normal, inout uint state) {
     return normalize(localDir.x * u + localDir.y * v + localDir.z * w);
 }
 
+// GGX/Trowbridge-Reitz importance sampling для металлических материалов
+// Генерирует направление отражения на основе GGX distribution
+vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
+    float alpha = roughness * roughness;
+    float alpha2 = alpha * alpha;
+    
+    // Сэмплируем полусферу в локальной системе координат
+    float r1 = rng(state);
+    float r2 = rng(state);
+    
+    // GGX importance sampling для нормалей микроповерхности
+    float cosTheta = sqrt((1.0 - r2) / (1.0 + (alpha2 - 1.0) * r2));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    float phi = 2.0 * PI * r1;
+    
+    // Локальная система координат
+    vec3 tangent, bitangent;
+    vec3 up = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    tangent = normalize(cross(up, normal));
+    bitangent = cross(normal, tangent);
+    
+    // Нормаль микроповерхности в локальной системе
+    vec3 halfVecLocal = vec3(
+        sinTheta * cos(phi),
+        sinTheta * sin(phi),
+        cosTheta
+    );
+    
+    // Преобразуем в мировую систему координат
+    vec3 halfVec = normalize(
+        halfVecLocal.x * tangent +
+        halfVecLocal.y * bitangent +
+        halfVecLocal.z * normal
+    );
+    
+    // Вычисляем направление отражения
+    vec3 reflectDir = reflect(-viewDir, halfVec);
+    
+    // Проверяем, что отраженное направление находится в правильной полусфере
+    if (dot(reflectDir, normal) <= 0.0) {
+        // Если нет, используем идеальное отражение как fallback
+        reflectDir = reflect(-viewDir, normal);
+    }
+    
+    return normalize(reflectDir);
+}
+
 vec3 reflectVec(vec3 v, vec3 n) {
     return v - 2.0 * dot(v, n) * n;
 }
 
-vec3 refractVec(vec3 uv, vec3 n, float etaiOverEtat) {
-    float cosTheta = min(dot(-uv, n), 1.0);
-    vec3 rOutPerp = etaiOverEtat * (uv + cosTheta * n);
-    vec3 rOutParallel = -sqrt(abs(1.0 - dot(rOutPerp, rOutPerp))) * n;
+// ОБНОВЛЕННАЯ ФИЗИЧЕСКИ КОРРЕКТНАЯ ФУНКЦИЯ ПРЕЛОМЛЕНИЯ
+// Используем правильную формулу Снеллиуса с учетом IOR и нормалей
+vec3 refractVec(vec3 v, vec3 n, float eta) {
+    float cosTheta = min(dot(-v, n), 1.0);
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    
+    if (eta * sinTheta > 1.0) {
+        // Полное внутреннее отражение
+        return reflectVec(v, n);
+    }
+    
+    vec3 rOutPerp = eta * (v + cosTheta * n);
+    vec3 rOutParallel = -sqrt(1.0 - min(dot(rOutPerp, rOutPerp), 1.0)) * n;
     return rOutPerp + rOutParallel;
 }
 
-float reflectance(float cosine, float refIdx) {
-    float r0 = (1.0 - refIdx) / (1.0 + refIdx);
+// Улучшенная функция отражения Френеля с учетом обоих случаев (вход/выход)
+float reflectance(float cosine, float relIOR) {
+    // relIOR = n2/n1 (n1 - откуда луч, n2 - куда луч)
+    
+    // Используем аппроксимацию Шлика для большей точности
+    float r0 = (relIOR - 1.0) / (relIOR + 1.0);
     r0 = r0 * r0;
-    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+    
+    // Для углов, близких к скользящим, увеличиваем отражение
+    float x = 1.0 - cosine;
+    float x5 = x * x * x * x * x;
+    
+    return r0 + (1.0 - r0) * x5;
 }
 
 // Простейший диффузный BRDF (Lambertian)
@@ -632,40 +849,17 @@ vec3 brdfLambert(vec3 albedo) {
 	return albedo / PI;
 }
 
-// Выбор случайного эмиссивного объекта (uniform по источникам света).
-// Используем однопроходный reservoir sampling, чтобы не хранить массив индексов.
-bool pickRandomLight(inout uint state, out int lightObjIndex, out int lightMatIndex) {
-	int objCount = int(objData.length()) / OBJ_STRIDE;
-	int found = 0;
-	int chosenObj = -1;
-	int chosenMat = -1;
+// Получение количества источников света (оптимизированная версия)
+int getLightCount() {
+	return lightIndices.length();
+}
 
-	for (int i = 0; i < objCount; i++) {
-		int oTyp, mIdx;
-		vec3 pos, size;
-		readObject(i, oTyp, mIdx, pos, size);
-
-		int mTyp;
-		float mRough, mIor;
-		vec3 mAlbedo, mEmit, mAbs;
-		readMaterial(mIdx, mTyp, mRough, mIor, mAlbedo, mEmit, mAbs);
-		if (mTyp == MAT_EMISSIVE && (mEmit.r > 0.0 || mEmit.g > 0.0 || mEmit.b > 0.0)) {
-			found++;
-			// Reservoir sampling: каждый источник имеет равный шанс быть выбранным
-			if (rng(state) < 1.0 / float(found)) {
-				chosenObj = i;
-				chosenMat = mIdx;
-			}
-		}
+// Получение индекса объекта источника света по индексу в списке источников
+int getLightObjectIndex(int lightIdx) {
+	if (lightIdx < 0 || lightIdx >= lightIndices.length()) {
+		return -1;
 	}
-
-	if (found == 0 || chosenObj < 0) {
-		return false;
-	}
-
-	lightObjIndex = chosenObj;
-	lightMatIndex = chosenMat;
-	return true;
+	return lightIndices[lightIdx];
 }
 
 // Сэмплирование точки на источнике света и расчёт PDF по площади.
@@ -702,20 +896,15 @@ bool sampleLightGeometry(
 	return false;
 }
 
-// Оценка прямого освещения от одного случайного источника света (next event estimation).
-// Сейчас учитываем только диффузные (Lambert) поверхности как приёмники света.
-vec3 estimateDirectLight(
-	Ray r,
+// Оценка прямого освещения от одного источника света (next event estimation).
+// Используется для сэмплирования отдельного источника.
+vec3 estimateDirectLightSingle(
+	int lightObjIndex,
+	int lightMatIndex,
 	Hit surfHit,
 	vec3 albedo,
 	inout uint state
 ) {
-	int lightObjIndex;
-	int lightMatIndex;
-	if (!pickRandomLight(state, lightObjIndex, lightMatIndex)) {
-		return vec3(0.0);
-	}
-
 	vec3 lightPos, lightNormal;
 	float pdfArea;
 	if (!sampleLightGeometry(lightObjIndex, lightPos, lightNormal, pdfArea, state)) {
@@ -746,9 +935,9 @@ vec3 estimateDirectLight(
 
 	// Читаем светоотдачу источника
 	int mTyp;
-	float mRough, mIor;
-	vec3 mAlbedo, mEmit, mAbs;
-	readMaterial(lightMatIndex, mTyp, mRough, mIor, mAlbedo, mEmit, mAbs);
+	float mRough, mIor, mSmoothness, mReflectivity, mAbsScale;
+	vec3 mAlbedo, mEmit, mAbs, mTint;
+	readMaterial(lightMatIndex, mTyp, mRough, mIor, mAlbedo, mEmit, mAbs, mSmoothness, mReflectivity, mTint, mAbsScale);
 	if (mTyp != MAT_EMISSIVE) {
 		return vec3(0.0);
 	}
@@ -767,9 +956,88 @@ vec3 estimateDirectLight(
 	float geometry = (cosSurf * cosLight) / max(1e-6, distSq);
 	vec3 contrib = f * mEmit * geometry / max(1e-6, pdfArea);
 
-	// Лёгкий clamp, чтобы защититься от экстремальных всплесков (fireflies)
-	contrib = min(contrib, vec3(50.0));
+	// Улучшенный firefly reduction: используем более умный подход
+	// Вместо простого clamp, применяем мягкое ограничение на основе яркости
+	float luminance = dot(contrib, vec3(0.2126, 0.7152, 0.0722));
+	float maxLuminance = 500.0; // увеличиваем максимальную допустимую яркость для предотвращения затемнения
+	if (luminance > maxLuminance) {
+		float scale = maxLuminance / max(luminance, 1e-6);
+		contrib *= scale;
+	}
+	
 	return contrib;
+}
+
+// Оценка прямого освещения от ВСЕХ источников света (sample all lights).
+// Это значительно улучшает качество освещения, особенно для сцен с несколькими источниками.
+// Использует оптимизированный список источников света вместо сканирования всех объектов.
+vec3 estimateDirectLight(
+	Ray r,
+	Hit surfHit,
+	vec3 albedo,
+	inout uint state
+) {
+	vec3 totalContrib = vec3(0.0);
+	int lightCount = getLightCount();
+	
+	if (lightCount == 0) {
+		return vec3(0.0);
+	}
+	
+	// Оптимизация производительности: ограничиваем количество источников для сэмплирования
+	// Сэмплируем максимум 8 источников для предотвращения падения производительности
+	const int MAX_LIGHTS_TO_SAMPLE = 8;
+	int lightsToSample = lightCount < MAX_LIGHTS_TO_SAMPLE ? lightCount : MAX_LIGHTS_TO_SAMPLE;
+	
+	// Если источников больше максимума, случайно выбираем подмножество
+	if (lightCount > MAX_LIGHTS_TO_SAMPLE) {
+		// Используем детерминированный выбор на основе состояния RNG
+		// для обеспечения воспроизводимости
+		int startIdx = int(rng(state) * float(lightCount)) % lightCount;
+		for (int j = 0; j < lightsToSample; j++) {
+			int i = (startIdx + j) % lightCount;
+			int objIdx = getLightObjectIndex(i);
+			if (objIdx < 0) {
+				continue;
+			}
+			
+			int oTyp, mIdx;
+			vec3 pos, size;
+			readObject(objIdx, oTyp, mIdx, pos, size);
+			
+			vec3 contrib = estimateDirectLightSingle(objIdx, mIdx, surfHit, albedo, state);
+			totalContrib += contrib;
+		}
+		// Масштабируем для компенсации того, что мы сэмплировали не все источники
+		totalContrib *= float(lightCount) / float(lightsToSample);
+	} else {
+		// Сэмплируем все источники, если их немного
+		for (int i = 0; i < lightCount; i++) {
+			int objIdx = getLightObjectIndex(i);
+			if (objIdx < 0) {
+				continue;
+			}
+			
+			int oTyp, mIdx;
+			vec3 pos, size;
+			readObject(objIdx, oTyp, mIdx, pos, size);
+			
+			vec3 contrib = estimateDirectLightSingle(objIdx, mIdx, surfHit, albedo, state);
+			totalContrib += contrib;
+		}
+	}
+	
+	// Усредняем по количеству реально сэмплированных источников
+	// Если сэмплировали подмножество, масштабирование уже применено в строке 847
+	if (lightCount > MAX_LIGHTS_TO_SAMPLE) {
+		// Сэмплировали подмножество, уже масштабировано - делим на количество сэмплированных
+		totalContrib /= float(lightsToSample);
+	} else {
+		// Сэмплировали все источники - делим на общее количество
+		totalContrib /= float(lightCount);
+	}
+	
+	return totalContrib;
 }
 
 // Фон / небо
@@ -916,22 +1184,29 @@ vec3 estimateVolumeLight(vec3 pos, vec3 viewDir, inout uint state) {
     vec3 sum = vec3(0.0);
     int objCount = int(objData.length()) / OBJ_STRIDE;
 
-    for (int i = 0; i < objCount; i++) {
+    // Используем оптимизированный список источников света
+    int lightCount = getLightCount();
+    for (int i = 0; i < lightCount; i++) {
+        int objIdx = getLightObjectIndex(i);
+        if (objIdx < 0) {
+            continue;
+        }
+        
         int oTyp, mIdx;
         vec3 oPos, oSize;
-        readObject(i, oTyp, mIdx, oPos, oSize);
+        readObject(objIdx, oTyp, mIdx, oPos, oSize);
 
         int mTyp;
-        float mRough, mIor;
-        vec3 mAlbedo, mEmit, mAbs;
-        readMaterial(mIdx, mTyp, mRough, mIor, mAlbedo, mEmit, mAbs);
+        float mRough, mIor, mSmoothness, mReflectivity, mAbsScale;
+        vec3 mAlbedo, mEmit, mAbs, mTint;
+        readMaterial(mIdx, mTyp, mRough, mIor, mAlbedo, mEmit, mAbs, mSmoothness, mReflectivity, mTint, mAbsScale);
         if (mTyp != MAT_EMISSIVE || (mEmit.r <= 0.0 && mEmit.g <= 0.0 && mEmit.b <= 0.0)) {
             continue;
         }
 
         vec3 lightPos, lightNormal;
         float pdfArea;
-        if (!sampleLightGeometry(i, lightPos, lightNormal, pdfArea, state)) {
+        if (!sampleLightGeometry(objIdx, lightPos, lightNormal, pdfArea, state)) {
             continue;
         }
         if (pdfArea <= 0.0) {
@@ -977,12 +1252,19 @@ vec3 estimateVolumeLight(vec3 pos, vec3 viewDir, inout uint state) {
 
     // Немного усиливаем объёмный свет, чтобы лучи были явно видны.
     vec3 result = sum * 2.0;
-    // Ограничиваем от экстремальных всплесков.
-    result = min(result, vec3(500.0));
+    
+    // Улучшенный firefly reduction для объёмного света
+    float luminance = dot(result, vec3(0.2126, 0.7152, 0.0722));
+    float maxLuminance = 500.0; // максимальная допустимая яркость для объёмного света
+    if (luminance > maxLuminance) {
+        float scale = maxLuminance / max(luminance, 1e-6);
+        result *= scale;
+    }
+    
     return result;
 }
 
-// Основной path tracing для одного луча (максимально близко к CPU rayColorOpt)
+// Основной path tracing для одного луча (исправленная версия с правильными отражениями)
 vec3 rayColor(Ray r, inout uint state) {
     vec3 throughput = vec3(1.0);
     vec3 radiance = vec3(0.0);
@@ -990,16 +1272,14 @@ vec3 rayColor(Ray r, inout uint state) {
     int depth = uMaxDepth;
     bool firstSegment = true;
     float firstHitT = 0.0;
+    int currentGlassObject = -1; // Отслеживаем текущий стеклянный объект
+    float accumulatedTravelDistance = 0.0; // Суммарное расстояние внутри стекла
 
-    // Объёмное рассеяние (single scattering) вдоль первичного луча.
-    // Выполняем только на первом проходе и только если включён GPU‑объёмный туман,
-    // чтобы не взорвать производительность.
+    // Объёмное рассеяние (single scattering) вдоль первичного луча
     if (fogGpuVolumetric > 0.5 && depth > 0) {
-        // Сохраним начальное состояние луча для марша.
         Ray primary = r;
-        // Сначала находим расстояние до первой геометрии (если есть).
         Hit hFirst;
-        float tMax = 40.0; // "дальность видимости" тумана
+        float tMax = 40.0;
         if (hitWorld(primary, 0.001, tMax, hFirst)) {
             tMax = hFirst.t;
         }
@@ -1011,32 +1291,67 @@ vec3 rayColor(Ray r, inout uint state) {
                 float t = (float(i) + 0.5) * step;
                 vec3 pos = rayAt(primary, t);
 
-                // Локальные параметры среды.
                 float sigma_s, sigma_a, sigma_t;
                 mediumCoeffs(pos, sigma_s, sigma_a, sigma_t);
                 if (sigma_t <= 0.0 || sigma_s <= 0.0) {
                     continue;
                 }
 
-                // Затухание от камеры до точки.
                 float Tr = exp(-sigma_t * t);
-
-                // Оценка света в этой точке (от эмиссивных источников).
                 vec3 Ls = estimateVolumeLight(pos, primary.dir, state);
-
-                // Дифференциальный вклад в радианс вдоль луча камеры.
                 vec3 dL = fogColor.rgb * Ls * sigma_s * Tr * step;
-
                 radiance += dL;
             }
         }
     }
+
     while (depth > 0) {
         Hit h;
-        if (!hitWorld(r, 0.001, 1e20, h)) {
+        
+        // Исключаем текущий стеклянный объект при поиске пересечений
+        bool hitFound = false;
+        float closest = 1e20;
+        Hit temp;
+        int objCount = int(objData.length()) / OBJ_STRIDE;
+        
+        for (int i = 0; i < objCount; i++) {
+            // Пропускаем текущий стеклянный объект, если мы внутри него
+            if (currentGlassObject >= 0 && i == currentGlassObject) {
+                continue;
+            }
+            
+            int typ, matIdx;
+            vec3 pos, size;
+            readObject(i, typ, matIdx, pos, size);
+            temp.matIndex = matIdx;
+            temp.objIndex = i;
+            
+            bool hitObj = false;
+            if (typ == OBJ_SPHERE) {
+                hitObj = hitSphere(pos, size.x, r, 0.001, closest, temp);
+            } else if (typ == OBJ_PLANE) {
+                hitObj = hitPlane(pos, vec3(0, 1, 0), r, 0.001, closest, temp);
+            } else if (typ == OBJ_BOX) {
+                vec3 bmin = pos - 0.5 * size;
+                vec3 bmax = pos + 0.5 * size;
+                
+                // Если мы внутри куба, ищем выход
+                if (currentGlassObject == i) {
+                    hitObj = hitBox(bmin, bmax, r, 0.001, closest, temp, true);
+                } else {
+                    hitObj = hitBox(bmin, bmax, r, 0.001, closest, temp, false);
+                }
+            }
+            
+            if (hitObj) {
+                hitFound = true;
+                closest = temp.t;
+                h = temp;
+            }
+        }
+        
+        if (!hitFound) {
             vec3 bg = backgroundColor(r);
-            // Если ничего не пересекли, по умолчанию не глушим небо туманом,
-            // если только не задано явное влияние тумана на sky.
             float missDist = 50.0;
             vec3 outBg = bg;
             if (fogDensity > 0.0 && fogAffectSky > 0.5) {
@@ -1047,9 +1362,9 @@ vec3 rayColor(Ray r, inout uint state) {
         }
 
         int typ;
-        float rough, ior;
-        vec3 albedo, emit, absorption;
-        readMaterial(h.matIndex, typ, rough, ior, albedo, emit, absorption);
+        float rough, ior, smoothness, reflectivity, absorptionScale;
+        vec3 albedo, emit, absorption, tint;
+        readMaterial(h.matIndex, typ, rough, ior, albedo, emit, absorption, smoothness, reflectivity, tint, absorptionScale);
 
         if (firstSegment) {
             firstSegment = false;
@@ -1057,113 +1372,209 @@ vec3 rayColor(Ray r, inout uint state) {
         }
 
         vec3 emitted = (typ == MAT_EMISSIVE) ? emit : vec3(0.0);
+        radiance += throughput * emitted;
 
-		// Случайные рассеяния по типу материала
+        // Случайные рассеяния по типу материала
         vec3 newDir;
         vec3 attenuation = albedo;
         bool scattered = true;
 
+        // Диффузные материалы
         if (typ == MAT_LAMBERT) {
-            // Косинусно-взвешенное направление для диффузного BRDF (Lambert)
             newDir = randomCosineDirection(h.normal, state);
+            attenuation = albedo;
+            
+            // Прямое освещение для диффузных материалов
+            vec3 direct = estimateDirectLight(r, h, albedo, state);
+            radiance += throughput * direct;
+            
         } else if (typ == MAT_METAL || typ == MAT_MIRROR) {
-            vec3 reflected = reflectVec(normalize(r.dir), h.normal);
-            if (typ == MAT_METAL && rough > 1e-4) {
-                // Приблизительная GGX‑подобная модель:
-                // интерполируем между идеальным отражением и случайным направлением вокруг него.
-                vec3 sampleDir = randomCosineDirection(reflected, state);
-                float alpha = rough * rough;
-                vec3 blended = normalize(mix(reflected, sampleDir, alpha));
-                newDir = blended;
-            } else {
-                newDir = normalize(reflected);
+            vec3 viewDir = normalize(r.dir);
+            float metalRough = rough;
+            if (smoothness > 0.0) {
+                metalRough = 1.0 - smoothness;
             }
-            if (dot(newDir, h.normal) <= 0.0) {
+            
+            // Используем reflectivity для металлов
+            float effectiveReflectivity = reflectivity > 0.0 ? reflectivity : 1.0;
+            
+            if (typ == MAT_METAL && metalRough > 1e-4) {
+                // Используем GGX importance sampling для шероховатых металлов
+                newDir = sampleGGX(viewDir, h.normal, metalRough, state);
+                
+                // Для шероховатых металлов учитываем, что не весь свет отражается
+                // Используем комбинацию specular и диффузной компоненты
+                float specularWeight = 1.0 / (1.0 + metalRough * metalRough * 2.0);
+                specularWeight = clamp(specularWeight, 0.1, 0.9);
+                float diffuseWeight = 1.0 - specularWeight;
+                
+                // Добавляем вклад от диффузной компоненты (для шероховатых металлов)
+                vec3 diffuseDirect = estimateDirectLight(r, h, albedo, state);
+                radiance += throughput * diffuseDirect * diffuseWeight * effectiveReflectivity * 0.5;
+                
+                // Корректируем attenuation для учета reflectivity и шероховатости
+                attenuation = albedo * (specularWeight * effectiveReflectivity + diffuseWeight * 0.3);
+            } else {
+                // Идеальное зеркальное отражение для зеркал и гладких металлов
+                newDir = reflectVec(viewDir, h.normal);
+                newDir = normalize(newDir);
+                attenuation = albedo * effectiveReflectivity;
+            }
+            
+            float dotNorm = dot(newDir, h.normal);
+            if (dotNorm <= 1e-6) {
                 scattered = false;
             }
+            
+            // Для металлов также добавляем прямое освещение через отражения
+            if (scattered && metalRough > 1e-4) {
+                // Сэмплируем направление отражения для прямого освещения
+                vec3 reflectDir = reflectVec(normalize(r.dir), h.normal);
+                Ray reflectRay;
+                reflectRay.orig = h.p + h.normal * 0.001;
+                reflectRay.dir = reflectDir;
+                
+                Hit reflectHit;
+                if (hitWorld(reflectRay, 0.001, 1e20, reflectHit)) {
+                    int rTyp;
+                    float rRough, rIor, rSmoothness, rReflectivity, rAbsScale;
+                    vec3 rAlbedo, rEmit, rAbsorption, rTint;
+                    readMaterial(reflectHit.matIndex, rTyp, rRough, rIor, rAlbedo, rEmit, rAbsorption, rSmoothness, rReflectivity, rTint, rAbsScale);
+                    
+                    // Если отражаемся от эмиссивного объекта
+                    if (rTyp == MAT_EMISSIVE) {
+                        vec3 directReflect = rEmit * max(0.0, dot(reflectHit.normal, -reflectDir)) / (reflectHit.t * reflectHit.t);
+                        radiance += throughput * directReflect * albedo * 0.5;
+                    }
+                }
+            }
+            
         } else if (typ == MAT_DIELECTRIC) {
             attenuation = vec3(1.0);
-            float refractionRatio = h.frontFace ? (1.0 / ior) : ior;
             vec3 unitDir = normalize(r.dir);
             float cosTheta = min(dot(-unitDir, h.normal), 1.0);
             float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-            bool cannotRefract = refractionRatio * sinTheta > 1.0;
-            vec3 direction;
-            if (cannotRefract || reflectance(cosTheta, refractionRatio) > rng(state)) {
-                direction = reflectVec(unitDir, h.normal);
+            
+            // Определяем, входим мы в объект или выходим
+            bool entering = h.frontFace;
+            float eta = entering ? (1.0 / ior) : ior;
+            
+            // ПРАВИЛЬНЫЙ РАСЧЕТ ВЕРОЯТНОСТИ ОТРАЖЕНИЯ ПО ФРЕНЕЛЮ
+            // Функция reflectance ожидает относительный индекс преломления n2/n1
+            // где n1 - среда откуда идет луч, n2 - среда куда идет луч
+            float relIOR = entering ? ior : (1.0 / ior); // n2/n1
+            
+            // Проверяем полное внутреннее отражение
+            if (eta * sinTheta > 1.0) {
+                newDir = reflectVec(unitDir, h.normal);
             } else {
-                direction = refractVec(unitDir, h.normal, refractionRatio);
-            }
-            newDir = normalize(direction);
-
-            // Beer-Lambert поглощение по реальной длине пути внутри диэлектрика
-            if (h.frontFace && (absorption.r > 0.0 || absorption.g > 0.0 || absorption.b > 0.0)) {
-                Ray exitRay;
-                exitRay.orig = h.p;
-                exitRay.dir = newDir;
-                Hit exitHit;
-                bool hitExit = false;
-                float closestExit = 1e20;
-
-                int objCount = int(objData.length()) / OBJ_STRIDE;
-                for (int i = 0; i < objCount; i++) {
-                    int oTyp, mIdx;
-                    vec3 pos, size;
-                    readObject(i, oTyp, mIdx, pos, size);
-                    // тот же материал
-                    if (mIdx != h.matIndex) continue;
-
-                    Hit temp;
-                    bool ok = false;
-                    if (oTyp == OBJ_SPHERE) {
-                        ok = hitSphere(pos, size.x, exitRay, 0.0001, closestExit, temp);
-                    } else if (oTyp == OBJ_PLANE) {
-                        ok = hitPlane(pos, vec3(0,1,0), exitRay, 0.0001, closestExit, temp);
-                    } else if (oTyp == OBJ_BOX) {
-                        vec3 bmin = pos - 0.5 * size;
-                        vec3 bmax = pos + 0.5 * size;
-                        ok = hitBox(bmin, bmax, exitRay, 0.0001, closestExit, temp);
-                    }
-                    if (ok && !temp.frontFace && temp.t < closestExit) {
-                        vec3 dp = temp.p - h.p;
-                        float distSq = dot(dp, dp);
-                        if (distSq > 1e-8 && distSq < 1000.0) {
-                            hitExit = true;
-                            closestExit = temp.t;
-                            exitHit = temp;
+                // ПРАВИЛЬНО: вероятность отражения зависит от угла и относительного IOR
+                float reflectProb = reflectance(cosTheta, relIOR);
+                
+                // При переходе из более плотной в менее плотную среду вероятность отражения выше
+                // Это физически корректно: полное внутреннее отражение происходит только при переходе из плотной в менее плотную
+                if (!entering) {
+                    // При выходе из стекла вероятность отражения выше для больших углов
+                    reflectProb = max(reflectProb, 0.05); // Минимальная вероятность отражения
+                }
+                
+                if (rng(state) < reflectProb) {
+                    newDir = reflectVec(unitDir, h.normal);
+                } else {
+                    newDir = refractVec(unitDir, h.normal, eta);
+                    
+                    // Применяем поглощение света внутри стекла
+                    float travelDistance = 0.0;
+                    
+                    // Для куба вычисляем расстояние до выхода
+                    if (entering) {
+                        // Запоминаем, что мы вошли в стеклянный объект
+                        currentGlassObject = h.objIndex;
+                        
+                        // Находим точку выхода
+                        Hit exitHit;
+                        int oTyp, mIdx;
+                        vec3 oPos, oSize;
+                        readObject(h.objIndex, oTyp, mIdx, oPos, oSize);
+                        
+                        if (oTyp == OBJ_BOX) {
+                            vec3 bmin = oPos - 0.5 * oSize;
+                            vec3 bmax = oPos + 0.5 * oSize;
+                            
+                            // Ищем выход из куба
+                            Ray exitRay;
+                            exitRay.orig = h.p + newDir * 0.001;
+                            exitRay.dir = newDir;
+                            if (hitBox(bmin, bmax, exitRay, 0.001, 1e20, exitHit, true)) {
+                                travelDistance = exitHit.t;
+                            }
+                        } else if (oTyp == OBJ_SPHERE) {
+                            // Для сферы вычисляем расстояние до противоположной стороны
+                            float radius = oSize.x;
+                            vec3 center = oPos;
+                            
+                            // Находим второе пересечение со сферой
+                            vec3 oc = (h.p + newDir * 0.001) - center;
+                            float a = dot(newDir, newDir);
+                            float halfB = dot(oc, newDir);
+                            float c = dot(oc, oc) - radius * radius;
+                            float disc = halfB * halfB - a * c;
+                            
+                            if (disc > 0) {
+                                float sqrtD = sqrt(disc);
+                                float root1 = (-halfB - sqrtD) / a;
+                                float root2 = (-halfB + sqrtD) / a;
+                                
+                                // Используем второй корень как точку выхода
+                                float exitT = max(root1, root2);
+                                if (exitT > 0.001) {
+                                    travelDistance = exitT;
+                                }
+                            }
                         }
+                        
+                        // Применяем поглощение на основе пройденного расстояния
+                        // Формула Beer-Lambert: I = I0 * exp(-sigma * d)
+                        // где sigma = absorption * absorptionScale, d = travelDistance (в см)
+                        if (travelDistance > 0.0) {
+                            accumulatedTravelDistance = travelDistance;
+                            vec3 effectiveAbsorption = absorption * absorptionScale;
+                            vec3 absorb = exp(-effectiveAbsorption * travelDistance);
+                            attenuation *= mix(vec3(1.0), absorb, 0.9);
+                            
+                            // Также применяем tint для цвета стекла
+                            if (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0) {
+                                attenuation *= tint;
+                            }
+                        }
+                    } else {
+                        // Выходим из стеклянного объекта
+                        currentGlassObject = -1;
+                        
+                        // Применяем поглощение для выходящего луча
+                        // Формула Beer-Lambert: I = I0 * exp(-sigma * d)
+                        // где sigma = absorption * absorptionScale, d = accumulatedTravelDistance (в см)
+                        if (accumulatedTravelDistance > 0.0) {
+                            vec3 effectiveAbsorption = absorption * absorptionScale;
+                            vec3 absorb = exp(-effectiveAbsorption * accumulatedTravelDistance);
+                            attenuation *= mix(vec3(1.0), absorb, 0.9);
+                            
+                            // Также применяем tint для цвета стекла
+                            if (tint.r > 0.0 || tint.g > 0.0 || tint.b > 0.0) {
+                                attenuation *= tint;
+                            }
+                        }
+                        accumulatedTravelDistance = 0.0;
                     }
                 }
-
-                if (hitExit) {
-                    vec3 dp = exitHit.p - h.p;
-                    float distance = length(dp);
-                    attenuation.r = exp(-absorption.r * distance);
-                    attenuation.g = exp(-absorption.g * distance);
-                    attenuation.b = exp(-absorption.b * distance);
-                    // продолжаем луч с выходной точки
-                    r.orig = exitHit.p;
-                    r.dir = newDir;
-                }
             }
+            newDir = normalize(newDir);
+            
         } else {
             scattered = false;
         }
 
-        // Эмиссивный вклад от материалов вдоль пути
-        radiance += throughput * emitted;
-
-        // Прямое освещение (next event estimation) для диффузных поверхностей.
-        // Это сильно улучшает освещение от маленьких ламп в комнате.
-        if (typ == MAT_LAMBERT) {
-            vec3 direct = estimateDirectLight(r, h, albedo, state);
-            radiance += throughput * direct;
-        }
-        if (!scattered) {
-            break;
-        }
-
-        // Russian roulette как в CPU: начинаем после нескольких отскоков (по глубине)
+        // Russian roulette
         const int rrThreshold = 3;
         if (depth <= rrThreshold) {
             float maxComp = max(attenuation.r, max(attenuation.g, attenuation.b));
@@ -1178,7 +1589,9 @@ vec3 rayColor(Ray r, inout uint state) {
         }
 
         throughput *= attenuation;
-        r.orig = h.p;
+        
+        // Обновляем луч
+        r.orig = h.p + h.normal * 0.001; // Сдвигаем точку, чтобы избежать самопересечения
         r.dir = newDir;
         depth--;
     }
@@ -1195,20 +1608,76 @@ void main() {
     uint state = hash_u(uint(pix.x) * 1973u ^ uint(pix.y) * 9277u ^ uFrameSeed);
 
     vec3 col = vec3(0.0);
-    for (int s = 0; s < uSamplesPerPx; s++) {
-        float u = (float(pix.x) + rng(state)) / float(uWidth  - 1);
-        // Инвертируем Y, чтобы совпадать с CPU-рендером (верхний левый угол = (0,0))
+    
+    // Stratified sampling: используем NxN сетку для первого сэмпла
+    // Вычисляем размер страты (например, 4x4 = 16 страт)
+    int strataSize = 4; // можно сделать настраиваемым
+    int totalStrata = strataSize * strataSize;
+    int samplesPerStratum = max(1, uSamplesPerPx / totalStrata);
+    int extraSamples = uSamplesPerPx - samplesPerStratum * totalStrata;
+    
+    int sampleIdx = 0;
+    
+    // Проходим по всем стратам
+    for (int sy = 0; sy < strataSize; sy++) {
+        for (int sx = 0; sx < strataSize; sx++) {
+            int samplesInStratum = samplesPerStratum;
+            if (sy * strataSize + sx < extraSamples) {
+                samplesInStratum++;
+            }
+            
+            for (int s = 0; s < samplesInStratum; s++) {
+                // Случайная точка внутри страты
+                float jitterX = rng(state);
+                float jitterY = rng(state);
+                
+                // Координаты страты в [0,1]
+                float stratumU = (float(sx) + jitterX) / float(strataSize);
+                float stratumV = (float(sy) + jitterY) / float(strataSize);
+                
+                // Преобразуем в координаты пикселя
+                float u = (float(pix.x) + stratumU) / float(uWidth - 1);
+                float fy = float(uHeight - 1 - pix.y);
+                float v = (fy + stratumV) / float(uHeight - 1);
+                
+                Ray r;
+                buildCamera(vec2(u, v), r, state);
+                col += rayColor(r, state);
+                sampleIdx++;
+            }
+        }
+    }
+    
+    // Добавляем оставшиеся сэмплы (если uSamplesPerPx не кратно totalStrata)
+    for (int s = sampleIdx; s < uSamplesPerPx; s++) {
+        float u = (float(pix.x) + rng(state)) / float(uWidth - 1);
         float fy = float(uHeight - 1 - pix.y);
         float v = (fy + rng(state)) / float(uHeight - 1);
         Ray r;
         buildCamera(vec2(u, v), r, state);
         col += rayColor(r, state);
     }
+    
     col /= float(uSamplesPerPx);
 
-    // Пишем ЛИНЕЙНЫЙ цвет (0..1) без гамма-коррекции.
-    col = max(col, vec3(0.0));
-    imageStore(destTex, pix, vec4(col, 1.0));
+    // Накопление на GPU: добавляем текущий сэмпл к накопительному буферу
+    int pixIdx = pix.y * uWidth + pix.x;
+    int accumBase = pixIdx * 3;
+    accumData[accumBase + 0] += col.r;
+    accumData[accumBase + 1] += col.g;
+    accumData[accumBase + 2] += col.b;
+    
+    // Читаем накопленное значение и усредняем по количеству сэмплов
+    float sampleCount = float(max(1, uSampleCount));
+    vec3 accumCol = vec3(
+        accumData[accumBase + 0],
+        accumData[accumBase + 1],
+        accumData[accumBase + 2]
+    ) / sampleCount;
+    
+    // Пишем усредненный ЛИНЕЙНЫЙ цвет (0..1) без гамма-коррекции.
+    vec3 finalCol = max(accumCol, vec3(0.0));
+    imageStore(destTex, pix, vec4(finalCol, 1.0));
 }
 `
 		cs, err := compileShader(computeSrc, gl.COMPUTE_SHADER)
@@ -1286,7 +1755,7 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		}
 		return nil
 	}
-	matStride := 16
+	matStride := 20
 	matData := make([]float32, matCount*matStride)
 	for i, m := range sc.Materials {
 		base := i * matStride
@@ -1311,9 +1780,36 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		matData[base+1] = float32(m.Rough)
 		matData[base+2] = float32(m.IOR)
 
+		// Smoothness для металлов: если не задан, вычисляем из Rough (обратная совместимость)
+		smoothness := m.Smoothness
+		if smoothness == 0 && m.Type == scene.MaterialMetal {
+			// Если smoothness не задан, вычисляем из rough для обратной совместимости
+			smoothness = 1.0 - m.Rough
+		}
+		if smoothness < 0 {
+			smoothness = 0
+		}
+		if smoothness > 1 {
+			smoothness = 1
+		}
+		matData[base+3] = float32(smoothness)
+
 		matData[base+4] = float32(m.Albedo.R)
 		matData[base+5] = float32(m.Albedo.G)
 		matData[base+6] = float32(m.Albedo.B)
+
+		// Reflectivity для металлов: если не задан, используем 1.0
+		reflectivity := m.Reflectivity
+		if reflectivity == 0 && m.Type == scene.MaterialMetal {
+			reflectivity = 1.0
+		}
+		if reflectivity < 0 {
+			reflectivity = 0
+		}
+		if reflectivity > 1 {
+			reflectivity = 1
+		}
+		matData[base+7] = float32(reflectivity)
 
 		// emit * power
 		matData[base+8] = float32(m.Emit.R * m.Power)
@@ -1323,6 +1819,26 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		matData[base+12] = float32(m.Absorption.R)
 		matData[base+13] = float32(m.Absorption.G)
 		matData[base+14] = float32(m.Absorption.B)
+
+		// AbsorptionScale для диэлектриков: если не задан, используем 0.01 (разумное значение для см)
+		absorptionScale := m.AbsorptionScale
+		if absorptionScale == 0 && m.Type == scene.MaterialDielectric {
+			absorptionScale = 0.01 // По умолчанию 0.01 для см
+		}
+		matData[base+15] = float32(absorptionScale)
+
+		// Tint для диэлектриков: если не задан, используем белый (1,1,1)
+		tintR := m.Tint.R
+		tintG := m.Tint.G
+		tintB := m.Tint.B
+		if tintR == 0 && tintG == 0 && tintB == 0 && m.Type == scene.MaterialDielectric {
+			tintR = 1.0
+			tintG = 1.0
+			tintB = 1.0
+		}
+		matData[base+16] = float32(tintR)
+		matData[base+17] = float32(tintG)
+		matData[base+18] = float32(tintB)
 	}
 
 	// --- Пакуем объекты ---
@@ -1334,6 +1850,10 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	for i, m := range sc.Materials {
 		matIndex[m.ID] = i
 	}
+
+	// Предвычисляем список индексов эмиссивных объектов для оптимизации
+	lightIndices := make([]int32, 0, objCount)
+
 	for i, o := range sc.Objects {
 		base := i * objStride
 
@@ -1350,10 +1870,13 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		}
 
 		objData[base+0] = typ
+		var matIdx int
 		if idx, ok := matIndex[o.MaterialID]; ok {
 			objData[base+1] = float32(idx)
+			matIdx = idx
 		} else {
 			objData[base+1] = 0
+			matIdx = 0
 		}
 
 		objData[base+4] = float32(o.Position.X)
@@ -1363,6 +1886,14 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		objData[base+8] = float32(o.Size.X)
 		objData[base+9] = float32(o.Size.Y)
 		objData[base+10] = float32(o.Size.Z)
+
+		// Проверяем, является ли объект источником света
+		if matIdx < len(sc.Materials) {
+			m := sc.Materials[matIdx]
+			if m.Type == scene.MaterialEmissive && (m.Emit.R > 0 || m.Emit.G > 0 || m.Emit.B > 0) {
+				lightIndices = append(lightIndices, int32(i))
+			}
+		}
 	}
 
 	// --- Пакуем камеру ---
@@ -1515,6 +2046,15 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		// 4 компоненты по 4 байта (float32) на пиксель
 		gl.BufferData(gl.PIXEL_PACK_BUFFER, cfg.Width*cfg.Height*4*4, nil, gl.STREAM_READ)
 		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+
+		// Инициализируем накопительный буфер на GPU
+		accumSize := pixelCount * 3 * 4 // 3 компоненты (RGB) по 4 байта (float32)
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.accumSSBO)
+		gl.BufferData(gl.SHADER_STORAGE_BUFFER, accumSize, nil, gl.DYNAMIC_DRAW)
+		// Инициализируем нулями
+		zeroData := make([]float32, pixelCount*3)
+		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
 	}
 
 	// Загружаем материалы/объекты/камеру/небо
@@ -1527,6 +2067,16 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	} else {
 		// хотя бы маленький буфер, чтобы avoid GL errors при нуле объектов
 		tmp := []float32{0}
+		gl.BufferData(gl.SHADER_STORAGE_BUFFER, len(tmp)*4, gl.Ptr(tmp), gl.DYNAMIC_DRAW)
+	}
+
+	// Загружаем список индексов эмиссивных объектов
+	gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 6, r.lightSSBO)
+	if len(lightIndices) > 0 {
+		gl.BufferData(gl.SHADER_STORAGE_BUFFER, len(lightIndices)*4, gl.Ptr(lightIndices), gl.DYNAMIC_DRAW)
+	} else {
+		// хотя бы маленький буфер, чтобы avoid GL errors при нуле источников света
+		tmp := []int32{0}
 		gl.BufferData(gl.SHADER_STORAGE_BUFFER, len(tmp)*4, gl.Ptr(tmp), gl.DYNAMIC_DRAW)
 	}
 
@@ -1545,16 +2095,37 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	// Bind image for compute shader: формат должен совпадать с внутренним форматом текстуры (RGBA16F).
 	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA16F)
 
+	// Bind накопительный буфер
+	gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 7, r.accumSSBO)
+
 	// Set uniforms.
 	locW := gl.GetUniformLocation(r.program, gl.Str("uWidth\x00"))
 	locH := gl.GetUniformLocation(r.program, gl.Str("uHeight\x00"))
 	locSpp := gl.GetUniformLocation(r.program, gl.Str("uSamplesPerPx\x00"))
 	locDepth := gl.GetUniformLocation(r.program, gl.Str("uMaxDepth\x00"))
 	locSeed := gl.GetUniformLocation(r.program, gl.Str("uFrameSeed\x00"))
+	locSampleCount := gl.GetUniformLocation(r.program, gl.Str("uSampleCount\x00"))
 
 	gl.Uniform1i(locW, int32(cfg.Width))
 	gl.Uniform1i(locH, int32(cfg.Height))
 	gl.Uniform1i(locDepth, int32(cfg.MaxDepth))
+
+	// Инициализируем накопительный буфер нулями при начале нового рендера
+	if r.width == cfg.Width && r.height == cfg.Height {
+		// Размер не изменился - просто очищаем существующий буфер
+		accumSize := pixelCount * 3 * 4
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.accumSSBO)
+		// Проверяем, что буфер существует и правильного размера
+		var bufSize int32
+		gl.GetBufferParameteriv(gl.SHADER_STORAGE_BUFFER, gl.BUFFER_SIZE, &bufSize)
+		if int(bufSize) != accumSize {
+			// Пересоздаем буфер нужного размера
+			gl.BufferData(gl.SHADER_STORAGE_BUFFER, accumSize, nil, gl.DYNAMIC_DRAW)
+		}
+		zeroData := make([]float32, pixelCount*3)
+		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+	}
 
 	// Временный буфер для чтения данных с GPU (RGBA16F -> float32)
 	tmp := make([]float32, pixelCount*4)
@@ -1572,6 +2143,7 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	for s := 0; s < passes; s++ {
 		// Один сэмпл на проход
 		gl.Uniform1i(locSpp, 1)
+		gl.Uniform1i(locSampleCount, int32(s+1)) // Количество накопленных сэмплов
 		gl.Uniform1ui(locSeed, uint32(time.Now().UnixNano())+uint32(s))
 
 		// Запуск compute shader
@@ -1579,47 +2151,31 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		groupsY := (cfg.Height + 15) / 16
 		gl.DispatchCompute(uint32(groupsX), uint32(groupsY), 1)
 
-		gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT | gl.PIXEL_BUFFER_BARRIER_BIT)
+		gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.SHADER_STORAGE_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT)
 
-		// Читаем результат текущего прохода в линейном пространстве (float32)
-		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
-		gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
-		gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
-
-		ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
-		if ptr == nil {
-			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
-			return fmt.Errorf("map PBO failed")
-		}
-
-		src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
-		copy(tmp, src)
-
-		gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
-		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
-
-		// Накопление в r.accum (линейное пространство, без гамма-коррекции)
-		acc := r.accum
-		for i := 0; i < pixelCount; i++ {
-			off := i * 4
-			rLin := tmp[off]
-			gLin := tmp[off+1]
-			bLin := tmp[off+2]
-			accIdx := i * 3
-			acc[accIdx+0] += rLin
-			acc[accIdx+1] += gLin
-			acc[accIdx+2] += bLin
-		}
-
+		// Читаем результат только при обновлении UI (не на каждом проходе!)
 		// Периодически обновляем img и вызываем progress()
 		if (s%updateEvery) == updateEvery-1 || s == passes-1 {
-			scale := 1.0 / float32(s+1)
+			// Читаем накопленный результат с GPU
+			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
+			gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
+			gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
+
+			ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
+			if ptr != nil {
+				src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
+				copy(tmp, src)
+				gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
+			}
+			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+
+			// Обрабатываем данные из текстуры (уже усредненные на GPU)
 			dst := img.Pix
 			for i := 0; i < pixelCount; i++ {
-				accIdx := i * 3
-				rLin := acc[accIdx+0] * scale
-				gLin := acc[accIdx+1] * scale
-				bLin := acc[accIdx+2] * scale
+				off := i * 4
+				rLin := tmp[off]
+				gLin := tmp[off+1]
+				bLin := tmp[off+2]
 
 				// Ограничиваем линейный цвет
 				if rLin < 0 {
@@ -1651,7 +2207,6 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 					bGamma = 1
 				}
 
-				off := i * 4
 				dst[off] = uint8(rGamma*255.0 + 0.5)
 				dst[off+1] = uint8(gGamma*255.0 + 0.5)
 				dst[off+2] = uint8(bGamma*255.0 + 0.5)
@@ -1662,176 +2217,240 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 				progress()
 			}
 
-			// Лёгкий denoise/blur после обновления кадра: небольшой билинейный фильтр 3x3
-			// поверх уже тон-маппленного и гамма-корректного изображения.
-			// Параметры и включение/отключение контролируются через переменные окружения или UI.
-			cfgDN := getDenoiseConfig()
-			w := cfg.Width
-			h := cfg.Height
-			if cfgDN.Enabled && w > 2 && h > 2 {
-				smoothed := make([]byte, len(dst))
-				sigmaS := cfgDN.SigmaS
-				sigmaR := cfgDN.SigmaR
-				twoSigmaS2 := 2 * sigmaS * sigmaS
-				twoSigmaR2 := 2 * sigmaR * sigmaR
+			// Денойзинг выполняется только в конце рендеринга для производительности
+			// (пропускаем промежуточные обновления)
+		}
+	}
 
-				for y := 0; y < h; y++ {
-					for x := 0; x < w; x++ {
-						centerIdx := (y*w + x) * 4
-						cr := float64(dst[centerIdx]) / 255.0
-						cg := float64(dst[centerIdx+1]) / 255.0
-						cb := float64(dst[centerIdx+2]) / 255.0
+	// Финальная обработка: денойзинг и сглаживание только в конце
+	// Читаем финальный результат с GPU
+	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
+	gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
+	gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
 
-						var sumR, sumG, sumB, sumW float64
-						for ky := -1; ky <= 1; ky++ {
-							ny := y + ky
-							if ny < 0 || ny >= h {
-								continue
-							}
-							for kx := -1; kx <= 1; kx++ {
-								nx := x + kx
-								if nx < 0 || nx >= w {
-									continue
-								}
-								ni := (ny*w + nx) * 4
-								nr := float64(dst[ni]) / 255.0
-								ng := float64(dst[ni+1]) / 255.0
-								nb := float64(dst[ni+2]) / 255.0
+	ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
+	dst := img.Pix
+	if ptr != nil {
+		tmp := make([]float32, pixelCount*4)
+		src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
+		copy(tmp, src)
+		gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 
-								ds2 := float64(kx*kx + ky*ky)
-								// расстояние в цветовом пространстве (sRGB 0..1)
-								dr := cr - nr
-								dg := cg - ng
-								dbb := cb - nb
-								dr2 := dr*dr + dg*dg + dbb*dbb
+		// Обрабатываем финальные данные
+		for i := 0; i < pixelCount; i++ {
+			off := i * 4
+			rLin := tmp[off]
+			gLin := tmp[off+1]
+			bLin := tmp[off+2]
 
-								ws := math.Exp(-ds2 / twoSigmaS2)
-								wr := math.Exp(-dr2 / twoSigmaR2)
-								wgt := ws * wr
-
-								sumW += wgt
-								sumR += nr * wgt
-								sumG += ng * wgt
-								sumB += nb * wgt
-							}
-						}
-
-						if sumW > 0 {
-							nr := sumR / sumW
-							ng := sumG / sumW
-							nb := sumB / sumW
-							if nr < 0 {
-								nr = 0
-							} else if nr > 1 {
-								nr = 1
-							}
-							if ng < 0 {
-								ng = 0
-							} else if ng > 1 {
-								ng = 1
-							}
-							if nb < 0 {
-								nb = 0
-							} else if nb > 1 {
-								nb = 1
-							}
-							smoothed[centerIdx] = uint8(nr*255.0 + 0.5)
-							smoothed[centerIdx+1] = uint8(ng*255.0 + 0.5)
-							smoothed[centerIdx+2] = uint8(nb*255.0 + 0.5)
-							smoothed[centerIdx+3] = 255
-						} else {
-							// fallback: копируем исходный пиксель
-							smoothed[centerIdx] = dst[centerIdx]
-							smoothed[centerIdx+1] = dst[centerIdx+1]
-							smoothed[centerIdx+2] = dst[centerIdx+2]
-							smoothed[centerIdx+3] = dst[centerIdx+3]
-						}
-					}
-				}
-				copy(dst, smoothed)
+			// Ограничиваем линейный цвет
+			if rLin < 0 {
+				rLin = 0
+			}
+			if gLin < 0 {
+				gLin = 0
+			}
+			if bLin < 0 {
+				bLin = 0
 			}
 
-			// Дополнительное, более сильное сглаживание (blur) по всему изображению.
-			// Используется простое box-усреднение с радиусом 1..5, затем смешивание
-			// с оригиналом по коэффициенту strength (0..1).
-			cfgSM := getSmoothConfig()
-			if cfgSM.Enabled && w > 2 && h > 2 && cfgSM.Radius > 0 && cfgSM.Strength > 0 {
-				rad := cfgSM.Radius
-				if rad < 1 {
-					rad = 1
-				}
-				if rad > 5 {
-					rad = 5
-				}
-				str := cfgSM.Strength
-				if str < 0 {
-					str = 0
-				}
-				if str > 1 {
-					str = 1
-				}
+			// ACES-подобный тон-маппинг из HDR в [0,1]
+			rTm := acesTonemap(rLin)
+			gTm := acesTonemap(gLin)
+			bTm := acesTonemap(bLin)
 
-				blurred := make([]byte, len(dst))
-				for y := 0; y < h; y++ {
-					for x := 0; x < w; x++ {
-						var sumR, sumG, sumB float64
-						var count float64
-						for ky := -rad; ky <= rad; ky++ {
-							ny := y + ky
-							if ny < 0 || ny >= h {
-								continue
-							}
-							for kx := -rad; kx <= rad; kx++ {
-								nx := x + kx
-								if nx < 0 || nx >= w {
-									continue
-								}
-								ni := (ny*w + nx) * 4
-								sumR += float64(dst[ni])
-								sumG += float64(dst[ni+1])
-								sumB += float64(dst[ni+2])
-								count++
-							}
+			// Гамма-коррекция (переход в sRGB, gamma ~2.0 как в CPU-рендере)
+			rGamma := float32(math.Sqrt(float64(rTm)))
+			gGamma := float32(math.Sqrt(float64(gTm)))
+			bGamma := float32(math.Sqrt(float64(bTm)))
+			if rGamma > 1 {
+				rGamma = 1
+			}
+			if gGamma > 1 {
+				gGamma = 1
+			}
+			if bGamma > 1 {
+				bGamma = 1
+			}
+
+			dst[off] = uint8(rGamma*255.0 + 0.5)
+			dst[off+1] = uint8(gGamma*255.0 + 0.5)
+			dst[off+2] = uint8(bGamma*255.0 + 0.5)
+			dst[off+3] = 255
+		}
+	}
+	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+
+	cfgDN := getDenoiseConfig()
+	w := cfg.Width
+	h := cfg.Height
+	if cfgDN.Enabled && w > 2 && h > 2 {
+		smoothed := make([]byte, len(dst))
+		sigmaS := cfgDN.SigmaS
+		sigmaR := cfgDN.SigmaR
+		twoSigmaS2 := 2 * sigmaS * sigmaS
+		twoSigmaR2 := 2 * sigmaR * sigmaR
+
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				centerIdx := (y*w + x) * 4
+				cr := float64(dst[centerIdx]) / 255.0
+				cg := float64(dst[centerIdx+1]) / 255.0
+				cb := float64(dst[centerIdx+2]) / 255.0
+
+				var sumR, sumG, sumB, sumW float64
+				for ky := -1; ky <= 1; ky++ {
+					ny := y + ky
+					if ny < 0 || ny >= h {
+						continue
+					}
+					for kx := -1; kx <= 1; kx++ {
+						nx := x + kx
+						if nx < 0 || nx >= w {
+							continue
 						}
-						if count > 0 {
-							avgR := sumR / count
-							avgG := sumG / count
-							avgB := sumB / count
-							ci := (y*w + x) * 4
-							origR := float64(dst[ci])
-							origG := float64(dst[ci+1])
-							origB := float64(dst[ci+2])
+						ni := (ny*w + nx) * 4
+						nr := float64(dst[ni]) / 255.0
+						ng := float64(dst[ni+1]) / 255.0
+						nb := float64(dst[ni+2]) / 255.0
 
-							outR := (1-str)*origR + str*avgR
-							outG := (1-str)*origG + str*avgG
-							outB := (1-str)*origB + str*avgB
+						ds2 := float64(kx*kx + ky*ky)
+						// расстояние в цветовом пространстве (sRGB 0..1)
+						dr := cr - nr
+						dg := cg - ng
+						dbb := cb - nb
+						dr2 := dr*dr + dg*dg + dbb*dbb
 
-							if outR < 0 {
-								outR = 0
-							} else if outR > 255 {
-								outR = 255
-							}
-							if outG < 0 {
-								outG = 0
-							} else if outG > 255 {
-								outG = 255
-							}
-							if outB < 0 {
-								outB = 0
-							} else if outB > 255 {
-								outB = 255
-							}
+						ws := math.Exp(-ds2 / twoSigmaS2)
+						wr := math.Exp(-dr2 / twoSigmaR2)
+						wgt := ws * wr
 
-							blurred[ci] = byte(outR + 0.5)
-							blurred[ci+1] = byte(outG + 0.5)
-							blurred[ci+2] = byte(outB + 0.5)
-							blurred[ci+3] = 255
-						}
+						sumW += wgt
+						sumR += nr * wgt
+						sumG += ng * wgt
+						sumB += nb * wgt
 					}
 				}
-				copy(dst, blurred)
+
+				if sumW > 0 {
+					nr := sumR / sumW
+					ng := sumG / sumW
+					nb := sumB / sumW
+					if nr < 0 {
+						nr = 0
+					} else if nr > 1 {
+						nr = 1
+					}
+					if ng < 0 {
+						ng = 0
+					} else if ng > 1 {
+						ng = 1
+					}
+					if nb < 0 {
+						nb = 0
+					} else if nb > 1 {
+						nb = 1
+					}
+					smoothed[centerIdx] = uint8(nr*255.0 + 0.5)
+					smoothed[centerIdx+1] = uint8(ng*255.0 + 0.5)
+					smoothed[centerIdx+2] = uint8(nb*255.0 + 0.5)
+					smoothed[centerIdx+3] = 255
+				} else {
+					// fallback: копируем исходный пиксель
+					smoothed[centerIdx] = dst[centerIdx]
+					smoothed[centerIdx+1] = dst[centerIdx+1]
+					smoothed[centerIdx+2] = dst[centerIdx+2]
+					smoothed[centerIdx+3] = dst[centerIdx+3]
+				}
 			}
 		}
+		copy(dst, smoothed)
+	}
+
+	// Дополнительное, более сильное сглаживание (blur) по всему изображению.
+	// Используется простое box-усреднение с радиусом 1..5, затем смешивание
+	// с оригиналом по коэффициенту strength (0..1).
+	cfgSM := getSmoothConfig()
+	if cfgSM.Enabled && w > 2 && h > 2 && cfgSM.Radius > 0 && cfgSM.Strength > 0 {
+		rad := cfgSM.Radius
+		if rad < 1 {
+			rad = 1
+		}
+		if rad > 5 {
+			rad = 5
+		}
+		str := cfgSM.Strength
+		if str < 0 {
+			str = 0
+		}
+		if str > 1 {
+			str = 1
+		}
+
+		blurred := make([]byte, len(dst))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				var sumR, sumG, sumB float64
+				var count float64
+				for ky := -rad; ky <= rad; ky++ {
+					ny := y + ky
+					if ny < 0 || ny >= h {
+						continue
+					}
+					for kx := -rad; kx <= rad; kx++ {
+						nx := x + kx
+						if nx < 0 || nx >= w {
+							continue
+						}
+						ni := (ny*w + nx) * 4
+						sumR += float64(dst[ni])
+						sumG += float64(dst[ni+1])
+						sumB += float64(dst[ni+2])
+						count++
+					}
+				}
+				if count > 0 {
+					avgR := sumR / count
+					avgG := sumG / count
+					avgB := sumB / count
+					ci := (y*w + x) * 4
+					origR := float64(dst[ci])
+					origG := float64(dst[ci+1])
+					origB := float64(dst[ci+2])
+
+					outR := (1-str)*origR + str*avgR
+					outG := (1-str)*origG + str*avgG
+					outB := (1-str)*origB + str*avgB
+
+					if outR < 0 {
+						outR = 0
+					} else if outR > 255 {
+						outR = 255
+					}
+					if outG < 0 {
+						outG = 0
+					} else if outG > 255 {
+						outG = 255
+					}
+					if outB < 0 {
+						outB = 0
+					} else if outB > 255 {
+						outB = 255
+					}
+
+					blurred[ci] = byte(outR + 0.5)
+					blurred[ci+1] = byte(outG + 0.5)
+					blurred[ci+2] = byte(outB + 0.5)
+					blurred[ci+3] = 255
+				}
+			}
+		}
+		copy(dst, blurred)
+	}
+
+	// Финальное обновление UI после всех обработок
+	if progress != nil {
+		progress()
 	}
 
 	return nil

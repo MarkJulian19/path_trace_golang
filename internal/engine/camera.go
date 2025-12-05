@@ -58,7 +58,7 @@ func newCamera(scCam scene.Camera, cfg RenderConfig, rng *randSource) camera {
 }
 
 func (c camera) getRay(s, t float64) ray {
-	if c.lensRadius > 0 {
+	if c.lensRadius > 0 && c.rng != nil {
 		rd := randomInUnitSphere(c.rng).mul(c.lensRadius)
 		offset := c.u.mul(rd.x).add(c.v.mul(rd.y))
 		return ray{
@@ -72,5 +72,3 @@ func (c camera) getRay(s, t float64) ray {
 		dir:  c.lowerLeftCorner.add(c.horizontal.mul(s)).add(c.vertical.mul(t)).sub(c.origin),
 	}
 }
-
-

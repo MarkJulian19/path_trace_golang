@@ -65,6 +65,12 @@ func refractVec(uv, n vec3, etaiOverEtat float64) vec3 {
 
 func randomInUnitSphere(rng *randSource) vec3 {
 	// Оптимизированная версия с меньшим количеством вызовов функций
+	// Защита от nil rng
+	if rng == nil {
+		// Fallback: возвращаем случайное направление без использования rng
+		// Это не должно происходить в нормальной работе, но защищает от паники
+		return vec3{x: 0, y: 0, z: 1}
+	}
 	for {
 		x := rng.Float64()*2 - 1
 		y := rng.Float64()*2 - 1

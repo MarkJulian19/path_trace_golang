@@ -1,0 +1,996 @@
+{
+  "name": "GPU Path Tracer Showcase - All Materials & Objects",
+  "camera": {
+    "position": {
+      "x": 0,
+      "y": 3,
+      "z": 10
+    },
+    "target": {
+      "x": 0,
+      "y": 2,
+      "z": 0
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 45,
+    "aperture": 0.1,
+    "focus_dist": 10,
+    "aspect_ratio": 1.7777778
+  },
+  "objects": [
+    {
+      "id": "ground-plane",
+      "type": "plane",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "ground-lambert"
+    },
+    {
+      "id": "back-wall",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 4,
+        "z": -8
+      },
+      "size": {
+        "x": 20,
+        "y": 8,
+        "z": 0.5
+      },
+      "material_id": "wall-back"
+    },
+    {
+      "id": "left-wall",
+      "type": "box",
+      "position": {
+        "x": -8,
+        "y": 4,
+        "z": 0
+      },
+      "size": {
+        "x": 0.5,
+        "y": 8,
+        "z": 20
+      },
+      "material_id": "wall-left"
+    },
+    {
+      "id": "right-wall",
+      "type": "box",
+      "position": {
+        "x": 8,
+        "y": 4,
+        "z": 0
+      },
+      "size": {
+        "x": 0.5,
+        "y": 8,
+        "z": 20
+      },
+      "material_id": "wall-right"
+    },
+    {
+      "id": "ceiling",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 8,
+        "z": 0
+      },
+      "size": {
+        "x": 20,
+        "y": 0.5,
+        "z": 20
+      },
+      "material_id": "ceiling-lambert"
+    },
+    {
+      "id": "sphere-lambert-red",
+      "type": "sphere",
+      "position": {
+        "x": -5,
+        "y": 1.5,
+        "z": -2
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "lambert-red"
+    },
+    {
+      "id": "sphere-lambert-green",
+      "type": "sphere",
+      "position": {
+        "x": -3,
+        "y": 1.5,
+        "z": -2
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "lambert-green"
+    },
+    {
+      "id": "sphere-lambert-blue",
+      "type": "sphere",
+      "position": {
+        "x": -1,
+        "y": 1.5,
+        "z": -2
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "lambert-blue"
+    },
+    {
+      "id": "sphere-metal-rough",
+      "type": "sphere",
+      "position": {
+        "x": 1,
+        "y": 1.5,
+        "z": -2
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-rough-copper"
+    },
+    {
+      "id": "sphere-metal-medium",
+      "type": "sphere",
+      "position": {
+        "x": 3,
+        "y": 1.5,
+        "z": -2
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-medium-gold"
+    },
+    {
+      "id": "sphere-metal-smooth",
+      "type": "sphere",
+      "position": {
+        "x": 5,
+        "y": 1.5,
+        "z": -2
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-smooth-chrome"
+    },
+    {
+      "id": "sphere-mirror",
+      "type": "sphere",
+      "position": {
+        "x": -4,
+        "y": 1.5,
+        "z": 1
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "mirror-perfect"
+    },
+    {
+      "id": "sphere-glass-clear",
+      "type": "sphere",
+      "position": {
+        "x": -2,
+        "y": 1.5,
+        "z": 1
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "sphere-glass-tinted-blue",
+      "type": "sphere",
+      "position": {
+        "x": 0,
+        "y": 1.5,
+        "z": 1
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-tinted-blue"
+    },
+    {
+      "id": "sphere-glass-tinted-red",
+      "type": "sphere",
+      "position": {
+        "x": 2,
+        "y": 1.5,
+        "z": 1
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-tinted-red"
+    },
+    {
+      "id": "box-lambert-white",
+      "type": "box",
+      "position": {
+        "x": 4,
+        "y": 1.0,
+        "z": 1
+      },
+      "size": {
+        "x": 1.5,
+        "y": 2.0,
+        "z": 1.5
+      },
+      "material_id": "lambert-white"
+    },
+    {
+      "id": "box-metal-rough",
+      "type": "box",
+      "position": {
+        "x": -5,
+        "y": 1.0,
+        "z": 3
+      },
+      "size": {
+        "x": 1.5,
+        "y": 2.0,
+        "z": 1.5
+      },
+      "material_id": "metal-rough-iron"
+    },
+    {
+      "id": "box-metal-smooth",
+      "type": "box",
+      "position": {
+        "x": -3,
+        "y": 1.0,
+        "z": 3
+      },
+      "size": {
+        "x": 1.5,
+        "y": 2.0,
+        "z": 1.5
+      },
+      "material_id": "metal-smooth-silver"
+    },
+    {
+      "id": "box-glass-clear",
+      "type": "box",
+      "position": {
+        "x": -1,
+        "y": 1.0,
+        "z": 3
+      },
+      "size": {
+        "x": 1.5,
+        "y": 2.0,
+        "z": 1.5
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "box-mirror",
+      "type": "box",
+      "position": {
+        "x": 1,
+        "y": 1.0,
+        "z": 3
+      },
+      "size": {
+        "x": 1.5,
+        "y": 2.0,
+        "z": 1.5
+      },
+      "material_id": "mirror-perfect"
+    },
+    {
+      "id": "light-main-center",
+      "type": "sphere_light",
+      "position": {
+        "x": 0,
+        "y": 6.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-white-bright"
+    },
+    {
+      "id": "light-left-warm",
+      "type": "sphere_light",
+      "position": {
+        "x": -4,
+        "y": 5.5,
+        "z": 2
+      },
+      "size": {
+        "x": 0.5,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-warm"
+    },
+    {
+      "id": "light-right-cool",
+      "type": "sphere_light",
+      "position": {
+        "x": 4,
+        "y": 5.5,
+        "z": 2
+      },
+      "size": {
+        "x": 0.5,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-cool"
+    },
+    {
+      "id": "light-front-left",
+      "type": "sphere_light",
+      "position": {
+        "x": -2,
+        "y": 4.5,
+        "z": 4
+      },
+      "size": {
+        "x": 0.4,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-white-medium"
+    },
+    {
+      "id": "light-front-right",
+      "type": "sphere_light",
+      "position": {
+        "x": 2,
+        "y": 4.5,
+        "z": 4
+      },
+      "size": {
+        "x": 0.4,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-white-medium"
+    },
+    {
+      "id": "light-back-left",
+      "type": "sphere_light",
+      "position": {
+        "x": -3,
+        "y": 3.5,
+        "z": -4
+      },
+      "size": {
+        "x": 0.4,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-white-soft"
+    },
+    {
+      "id": "light-back-right",
+      "type": "sphere_light",
+      "position": {
+        "x": 3,
+        "y": 3.5,
+        "z": -4
+      },
+      "size": {
+        "x": 0.4,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-white-soft"
+    }
+  ],
+  "materials": [
+    {
+      "id": "ground-lambert",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.7,
+        "g": 0.7,
+        "b": 0.7
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-back",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.85
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-left",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.8,
+        "g": 0.4,
+        "b": 0.4
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-right",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.4,
+        "g": 0.4,
+        "b": 0.8
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "ceiling-lambert",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.85,
+        "g": 0.85,
+        "b": 0.9
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "lambert-red",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.8,
+        "g": 0.2,
+        "b": 0.2
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "lambert-green",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.2,
+        "g": 0.8,
+        "b": 0.2
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "lambert-blue",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.2,
+        "g": 0.2,
+        "b": 0.8
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "lambert-white",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.9
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-rough-copper",
+      "type": "metal",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.5,
+        "b": 0.3
+      },
+      "rough": 0.4,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-medium-gold",
+      "type": "metal",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.75,
+        "b": 0.3
+      },
+      "rough": 0.2,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-smooth-chrome",
+      "type": "metal",
+      "albedo": {
+        "r": 0.8,
+        "g": 0.8,
+        "b": 0.9
+      },
+      "rough": 0.05,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-rough-iron",
+      "type": "metal",
+      "albedo": {
+        "r": 0.6,
+        "g": 0.6,
+        "b": 0.65
+      },
+      "rough": 0.5,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-smooth-silver",
+      "type": "metal",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.95
+      },
+      "rough": 0.08,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "mirror-perfect",
+      "type": "mirror",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.95,
+        "b": 0.95
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "glass-clear",
+      "type": "dielectric",
+      "albedo": {
+        "r": 1.0,
+        "g": 1.0,
+        "b": 1.0
+      },
+      "rough": 0,
+      "ior": 1.5,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "tint": {
+    "r": 1.0,
+    "g": 1.0,
+    "b": 1.0
+  },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "glass-tinted-blue",
+      "type": "dielectric",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.95,
+        "b": 1.0
+      },
+      "tint": {
+        "r": 0.9,
+        "g": 0.95,
+        "b": 1.0
+      },
+      "rough": 0,
+      "ior": 1.5,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0.05,
+        "g": 0.02,
+        "b": 0
+      }
+    },
+    {
+      "id": "glass-tinted-red",
+      "type": "dielectric",
+      "albedo": {
+        "r": 1.0,
+        "g": 0.95,
+        "b": 0.9
+      },
+      "tint": {
+        "r": 1.0,
+        "g": 0.95,
+        "b": 0.9
+      },
+      "rough": 0,
+      "ior": 1.5,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0.02,
+        "b": 0.05
+      }
+    },
+    {
+      "id": "light-white-bright",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 1.0,
+        "g": 0.95,
+        "b": 0.9
+      },
+      "power": 0.5,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-white-medium",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 1.0,
+        "g": 0.95,
+        "b": 0.9
+      },
+      "power": 0.5,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-white-soft",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 1.0,
+        "g": 0.95,
+        "b": 0.9
+      },
+      "power": 0.5,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-warm",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 1.0,
+        "g": 0.8,
+        "b": 0.6
+      },
+      "power": 0.5,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-cool",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0.6,
+        "g": 0.8,
+        "b": 1.0
+      },
+      "power": 0.5,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    }
+  ],
+  "settings": {
+    "width": 800,
+    "height": 450,
+    "samples_per_px": 1,
+    "max_depth": 12
+  },
+  "sky": {
+    "type": "gradient",
+    "horizon": {
+      "r": 0.6,
+      "g": 0.7,
+      "b": 0.9
+    },
+    "zenith": {
+      "r": 0.3,
+      "g": 0.4,
+      "b": 0.6
+    }
+  },
+  "background": {
+    "r": 0.3,
+    "g": 0.4,
+    "b": 0.6
+  },
+  "fog": {
+    "density": 0.02,
+    "color": {
+      "r": 0.8,
+      "g": 0.85,
+      "b": 0.9
+    },
+    "scatter": 0.3,
+    "sigma_s": 0.01,
+    "sigma_a": 0.01,
+    "g": 0.2,
+    "hetero_strength": 0.3,
+    "noise_scale": 3.0,
+    "noise_octaves": 3,
+    "affect_sky": false,
+    "gpu_volumetric": true
+  }
+}
+

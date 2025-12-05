@@ -375,6 +375,16 @@ func Run(scenePath, mode string) error {
 	roughEntry := widget.NewEntry()
 	iorEntry := widget.NewEntry()
 
+	// Новые параметры для металлов
+	smoothnessEntry := widget.NewEntry()
+	reflectivityEntry := widget.NewEntry()
+
+	// Новые параметры для стекла
+	tintREntry := widget.NewEntry()
+	tintGEntry := widget.NewEntry()
+	tintBEntry := widget.NewEntry()
+	absorptionScaleEntry := widget.NewEntry()
+
 	setMaterialFormEnabled := func(enabled bool) {
 		if enabled {
 			matTypeSelect.Enable()
@@ -387,6 +397,12 @@ func Run(scenePath, mode string) error {
 			powerEntry.Enable()
 			roughEntry.Enable()
 			iorEntry.Enable()
+			smoothnessEntry.Enable()
+			reflectivityEntry.Enable()
+			tintREntry.Enable()
+			tintGEntry.Enable()
+			tintBEntry.Enable()
+			absorptionScaleEntry.Enable()
 		} else {
 			matTypeSelect.Disable()
 			albR.Disable()
@@ -398,9 +414,47 @@ func Run(scenePath, mode string) error {
 			powerEntry.Disable()
 			roughEntry.Disable()
 			iorEntry.Disable()
+			smoothnessEntry.Disable()
+			reflectivityEntry.Disable()
+			tintREntry.Disable()
+			tintGEntry.Disable()
+			tintBEntry.Disable()
+			absorptionScaleEntry.Disable()
 		}
 	}
 	setMaterialFormEnabled(false)
+
+	// Функция для показа/скрытия полей в зависимости от типа материала
+	updateMaterialFormVisibility := func() {
+		if selectedMat < 0 || selectedMat >= len(sc.Materials) {
+			return
+		}
+		m := sc.Materials[selectedMat]
+		isMetal := m.Type == scene.MaterialMetal || m.Type == scene.MaterialMirror
+		isDielectric := m.Type == scene.MaterialDielectric
+
+		// Показываем/скрываем поля для металлов
+		if isMetal {
+			smoothnessEntry.Show()
+			reflectivityEntry.Show()
+		} else {
+			smoothnessEntry.Hide()
+			reflectivityEntry.Hide()
+		}
+
+		// Показываем/скрываем поля для стекла
+		if isDielectric {
+			tintREntry.Show()
+			tintGEntry.Show()
+			tintBEntry.Show()
+			absorptionScaleEntry.Show()
+		} else {
+			tintREntry.Hide()
+			tintGEntry.Hide()
+			tintBEntry.Hide()
+			absorptionScaleEntry.Hide()
+		}
+	}
 
 	loadMaterialToForm := func(idx int) {
 		if idx < 0 || idx >= len(sc.Materials) {
@@ -419,11 +473,51 @@ func Run(scenePath, mode string) error {
 		powerEntry.SetText(fmt.Sprintf("%.2f", m.Power))
 		roughEntry.SetText(fmt.Sprintf("%.2f", m.Rough))
 		iorEntry.SetText(fmt.Sprintf("%.2f", m.IOR))
+
+		// Загружаем новые параметры для металлов
+		smoothness := m.Smoothness
+		if smoothness == 0 && (m.Type == scene.MaterialMetal || m.Type == scene.MaterialMirror) {
+			// Вычисляем из rough для обратной совместимости
+			smoothness = 1.0 - m.Rough
+		}
+		smoothnessEntry.SetText(fmt.Sprintf("%.2f", smoothness))
+
+		reflectivity := m.Reflectivity
+		if reflectivity == 0 && (m.Type == scene.MaterialMetal || m.Type == scene.MaterialMirror) {
+			reflectivity = 1.0
+		}
+		reflectivityEntry.SetText(fmt.Sprintf("%.2f", reflectivity))
+
+		// Загружаем новые параметры для стекла
+		tintR := m.Tint.R
+		tintG := m.Tint.G
+		tintB := m.Tint.B
+		if tintR == 0 && tintG == 0 && tintB == 0 && m.Type == scene.MaterialDielectric {
+			tintR = 1.0
+			tintG = 1.0
+			tintB = 1.0
+		}
+		tintREntry.SetText(fmt.Sprintf("%.2f", tintR))
+		tintGEntry.SetText(fmt.Sprintf("%.2f", tintG))
+		tintBEntry.SetText(fmt.Sprintf("%.2f", tintB))
+
+		absorptionScale := m.AbsorptionScale
+		if absorptionScale == 0 && m.Type == scene.MaterialDielectric {
+			absorptionScale = 0.01 // По умолчанию 0.01 для см
+		}
+		absorptionScaleEntry.SetText(fmt.Sprintf("%.4f", absorptionScale))
+
+		updateMaterialFormVisibility()
 	}
 
 	matList.OnSelected = func(id widget.ListItemID) {
 		selectedMat = int(id)
 		loadMaterialToForm(selectedMat)
+	}
+
+	// Обновляем видимость полей при изменении типа материала
+	matTypeSelect.OnChanged = func(selected string) {
+		updateMaterialFormVisibility()
 	}
 
 	applyMaterial := widget.NewButton("Apply material", func() {
@@ -451,6 +545,32 @@ func Run(scenePath, mode string) error {
 		m.Power = parseF(powerEntry, m.Power)
 		m.Rough = parseF(roughEntry, m.Rough)
 		m.IOR = parseF(iorEntry, m.IOR)
+
+		// Сохраняем новые параметры для металлов
+		if m.Type == scene.MaterialMetal || m.Type == scene.MaterialMirror {
+			m.Smoothness = parseF(smoothnessEntry, m.Smoothness)
+			if m.Smoothness < 0 {
+				m.Smoothness = 0
+			}
+			if m.Smoothness > 1 {
+				m.Smoothness = 1
+			}
+			m.Reflectivity = parseF(reflectivityEntry, m.Reflectivity)
+			if m.Reflectivity < 0 {
+				m.Reflectivity = 0
+			}
+			if m.Reflectivity > 1 {
+				m.Reflectivity = 1
+			}
+		}
+
+		// Сохраняем новые параметры для стекла
+		if m.Type == scene.MaterialDielectric {
+			m.Tint.R = parseF(tintREntry, m.Tint.R)
+			m.Tint.G = parseF(tintGEntry, m.Tint.G)
+			m.Tint.B = parseF(tintBEntry, m.Tint.B)
+		}
+
 		sc.Materials[selectedMat] = m
 		matList.Refresh()
 		clearFinalImage() // очищаем сохранённое финальное изображение при изменении материала
@@ -482,6 +602,12 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Power"), powerEntry,
 			widget.NewLabel("Rough"), roughEntry,
 			widget.NewLabel("IOR"), iorEntry,
+			widget.NewLabel("Smoothness (Metal)"), smoothnessEntry,
+			widget.NewLabel("Reflectivity (Metal)"), reflectivityEntry,
+			widget.NewLabel("Tint R (Glass)"), tintREntry,
+			widget.NewLabel("Tint G (Glass)"), tintGEntry,
+			widget.NewLabel("Tint B (Glass)"), tintBEntry,
+			widget.NewLabel("Absorption Scale (Glass)"), absorptionScaleEntry,
 		),
 		applyMaterial,
 	)

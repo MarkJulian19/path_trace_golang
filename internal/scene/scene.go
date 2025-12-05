@@ -48,7 +48,7 @@ type Material struct {
 	Type MaterialType `json:"type"`
 
 	Albedo Color   `json:"albedo"`
-	Rough  float64 `json:"rough"` // for metal and lambert (roughness)
+	Rough  float64 `json:"rough"` // for metal and lambert (roughness), deprecated for metals (use Smoothness)
 	IOR    float64 `json:"ior"`   // for dielectric
 
 	Emit Color   `json:"emit"`  // emissive color
@@ -57,6 +57,14 @@ type Material struct {
 	// Absorption for dielectric materials (color tinting through glass)
 	// Higher values mean more absorption (darker color)
 	Absorption Color `json:"absorption"` // for dielectric (default: 0,0,0 = no absorption)
+	
+	// Advanced parameters for metals
+	Smoothness  float64 `json:"smoothness"`  // for metals: 0.0 = matte, 1.0 = perfect mirror (default: 1.0)
+	Reflectivity float64 `json:"reflectivity"` // for metals: 0.0-1.0, controls reflection intensity (default: 1.0)
+	
+	// Advanced parameters for dielectrics (glass)
+	Tint Color `json:"tint"` // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
+	AbsorptionScale float64 `json:"absorption_scale"` // for dielectric: scale factor for absorption coefficient (default: 0.01, units are in cm)
 }
 
 // ObjectType enumerates supported geometric primitives.

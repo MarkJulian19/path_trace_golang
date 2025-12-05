@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"image"
 	"math"
 	"os"
@@ -48,8 +49,8 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 	}
 
 	world := sceneToWorld(sc)
-	rng := newRandSource()
-	cam := newCamera(sc.Camera, cfg, rng)
+	// Камера будет создаваться в каждой goroutine с локальным rng
+	// для безопасности конкурентного доступа
 
 	// Поддержка нового градиентного неба или старого простого фона
 	var bgFunc func(ray) vec3
@@ -164,6 +165,8 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 		go func() {
 			defer wg.Done()
 			localRng := newRandSource()
+			// Создаем камеру с локальным rng для безопасности конкурентного доступа
+			localCam := newCamera(sc.Camera, cfg, localRng)
 
 			for t := range tiles {
 				for y := t.y0; y < t.y1; y++ {
@@ -178,7 +181,7 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 						for s := 0; s < cfg.SamplesPerPx; s++ {
 							u := (xFloat + localRng.Float64()) * invWidth
 							vv := (flipY + localRng.Float64()) * invHeight
-							r := cam.getRay(u, vv)
+							r := localCam.getRay(u, vv)
 							var sampleRec hitRecord
 							col = col.add(rayColorOpt(r, world, bgFunc, cfg.MaxDepth, localRng, &sampleRec))
 						}
@@ -242,9 +245,7 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 	}
 }
 
-// renderIntoGPU is a placeholder that currently falls back to CPU implementation.
-// This keeps behaviour safe while allowing the UI / CLI to switch backends.
-// For now it executes a simple GPU compute shader that renders a gradient.
+// renderIntoGPU executes GPU rendering using compute shaders.
 // If GPU path fails for any reason, it falls back to CPU renderer.
 func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
 	gpuCfg := gpu.RenderConfig{
@@ -254,6 +255,8 @@ func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 		MaxDepth:     cfg.MaxDepth,
 	}
 	if err := gpu.Render(sc, gpuCfg, img, progress); err != nil {
+		// Логируем ошибку для отладки
+		fmt.Fprintf(os.Stderr, "GPU render error: %v\nFalling back to CPU renderer.\n", err)
 		// Если что-то пошло не так с OpenGL/GLFW, безопасно рендерим на CPU.
 		renderIntoCPU(sc, cfg, img, progress)
 	}

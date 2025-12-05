@@ -1,0 +1,483 @@
+{
+  "name": "Metal and Glass Cubes in Room",
+  "camera": {
+    "position": {
+      "x": -2.5,
+      "y": 3,
+      "z": 5.5
+    },
+    "target": {
+      "x": -0.9520649081431036,
+      "y": 0.7078906639674676,
+      "z": -2.150008610653413
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 90,
+    "aperture": 0.1,
+    "focus_dist": 8,
+    "aspect_ratio": 1.7777778
+  },
+  "objects": [
+    {
+      "id": "ground-plane",
+      "type": "plane",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "ground-lambert"
+    },
+    {
+      "id": "back-wall",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 4,
+        "z": -6
+      },
+      "size": {
+        "x": 12,
+        "y": 8,
+        "z": 0.5
+      },
+      "material_id": "wall-back"
+    },
+    {
+      "id": "left-wall",
+      "type": "box",
+      "position": {
+        "x": -6,
+        "y": 4,
+        "z": 0
+      },
+      "size": {
+        "x": 0.5,
+        "y": 8,
+        "z": 12
+      },
+      "material_id": "wall-left"
+    },
+    {
+      "id": "right-wall",
+      "type": "box",
+      "position": {
+        "x": 6,
+        "y": 4,
+        "z": 0
+      },
+      "size": {
+        "x": 0.5,
+        "y": 8,
+        "z": 12
+      },
+      "material_id": "wall-right"
+    },
+    {
+      "id": "ceiling",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 8,
+        "z": 0
+      },
+      "size": {
+        "x": 12,
+        "y": 0.5,
+        "z": 12
+      },
+      "material_id": "ceiling-lambert"
+    },
+    {
+      "id": "cube-copper",
+      "type": "box",
+      "position": {
+        "x": -2.5,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 1.5,
+        "y": 1.5,
+        "z": 1.5
+      },
+      "material_id": "metal-copper"
+    },
+    {
+      "id": "cube-silver",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 1.5,
+        "y": 1.5,
+        "z": 1.5
+      },
+      "material_id": "metal-silver"
+    },
+    {
+      "id": "cube-glass",
+      "type": "box",
+      "position": {
+        "x": 2.5,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 1.5,
+        "y": 1.5,
+        "z": 1.5
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "light-top",
+      "type": "sphere_light",
+      "position": {
+        "x": 0,
+        "y": 7.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-white"
+    },
+    {
+      "id": "box-10",
+      "type": "box",
+      "position": {
+        "x": 2,
+        "y": 5,
+        "z": 3
+      },
+      "size": {
+        "x": 2,
+        "y": 2,
+        "z": 0.1
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "sphere-11",
+      "type": "sphere",
+      "position": {
+        "x": -2,
+        "y": 2,
+        "z": 3
+      },
+      "size": {
+        "x": 1,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-clear"
+    }
+  ],
+  "materials": [
+    {
+      "id": "ground-lambert",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.8,
+        "g": 0.8,
+        "b": 0.8
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-back",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.7,
+        "g": 0.7,
+        "b": 0.75
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-left",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.75,
+        "g": 0.7,
+        "b": 0.7
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-right",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.7,
+        "g": 0.75,
+        "b": 1
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "ceiling-lambert",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.9
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-copper",
+      "type": "metal",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.5,
+        "b": 0.3
+      },
+      "rough": 1,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 1,
+      "reflectivity": 1,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-silver",
+      "type": "metal",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.95
+      },
+      "rough": 1,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 1,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "glass-clear",
+      "type": "dielectric",
+      "albedo": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "rough": 0,
+      "ior": 1.1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "light-white",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 1,
+        "g": 0.95,
+        "b": 0.9
+      },
+      "power": 0.5,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    }
+  ],
+  "settings": {
+    "width": 0,
+    "height": 0,
+    "samples_per_px": 0,
+    "max_depth": 0
+  },
+  "background": {
+    "r": 0.1,
+    "g": 0.1,
+    "b": 0.15
+  },
+  "sky": {
+    "type": "solid",
+    "color": {
+      "r": 0.1,
+      "g": 0.1,
+      "b": 0.15
+    },
+    "horizon": {
+      "r": 0,
+      "g": 0,
+      "b": 0
+    },
+    "zenith": {
+      "r": 0,
+      "g": 0,
+      "b": 0
+    }
+  }
+}

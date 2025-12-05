@@ -32,7 +32,12 @@ func convertMaterial(m scene.Material) material {
 
 	switch m.Type {
 	case scene.MaterialMetal:
-		return material{typ: matMetal, albedo: al, rough: clamp(m.Rough, 0, 1), absorption: vec3{x: 0, y: 0, z: 0}}
+		// Для металлов используем Smoothness, если задан, иначе вычисляем из Rough
+		rough := m.Rough
+		if m.Smoothness > 0 {
+			rough = 1.0 - clamp(m.Smoothness, 0, 1)
+		}
+		return material{typ: matMetal, albedo: al, rough: clamp(rough, 0, 1), absorption: vec3{x: 0, y: 0, z: 0}}
 	case scene.MaterialDielectric:
 		ior := m.IOR
 		if ior == 0 {
