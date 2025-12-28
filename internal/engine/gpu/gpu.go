@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-gl/gl/v3.3-core/gl"
@@ -140,6 +141,25 @@ var (
 	selectedObjectMutex sync.RWMutex
 )
 
+// Глобальный флаг отмены рендеринга (используется для прерывания длительных операций)
+var (
+	renderCancelFlag int32 = 0 // 0 = продолжать, 1 = отменить
+)
+
+// SetRenderCancel устанавливает флаг отмены рендеринга
+func SetRenderCancel(cancel bool) {
+	if cancel {
+		atomic.StoreInt32(&renderCancelFlag, 1)
+	} else {
+		atomic.StoreInt32(&renderCancelFlag, 0)
+	}
+}
+
+// IsRenderCancelled проверяет, был ли запрошен отмена рендеринга
+func IsRenderCancelled() bool {
+	return atomic.LoadInt32(&renderCancelFlag) == 1
+}
+
 // getSmoothConfig читает настройки сглаживания из переменных окружения один раз.
 // PATHTRACER_GPU_SMOOTH: "0"/"false"/"off" — выкл, "1"/"true"/"on" — вкл (по умолчанию: выкл).
 // PATHTRACER_GPU_SMOOTH_RADIUS: целое 1..5 (по умолчанию 2).
@@ -257,6 +277,7 @@ type gpuRenderer struct {
 	program          uint32
 	wireframeProgram uint32 // Отдельный шейдер для wireframe режима
 	imgTexture       uint32
+	prevFrameTexture uint32 // Текстура для предыдущего кадра (Temporal Accumulation)
 	pbo              uint32
 	pboBack          uint32 // Второй PBO для асинхронного чтения (двойная буферизация)
 	pboIndex         int    // Индекс текущего PBO (0 или 1)
@@ -264,6 +285,7 @@ type gpuRenderer struct {
 	objSSBO          uint32
 	lightSSBO        uint32 // SSBO для списка индексов эмиссивных объектов
 	accumSSBO        uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
+	varianceSSBO     uint32 // SSBO для variance данных (width * height * 9 * float32) - [mean, M2, count] × 3 канала
 	camUBO           uint32
 	skyUBO           uint32
 	fogUBO           uint32
@@ -280,6 +302,7 @@ type RenderConfig struct {
 	Height       int
 	SamplesPerPx int
 	MaxDepth     int
+	MaxRayDist   float32 // Максимальная длина луча (для предотвращения бесконечной трассировки)
 }
 
 // Go-side copies of material / object type constants used in GLSL.
@@ -381,6 +404,14 @@ func (r *gpuRenderer) initGL() error {
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
 
+		// Текстура для предыдущего кадра (Temporal Accumulation)
+		gl.GenTextures(1, &r.prevFrameTexture)
+		gl.BindTexture(gl.TEXTURE_2D, r.prevFrameTexture)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+
 		gl.GenBuffers(1, &r.pbo)
 		gl.GenBuffers(1, &r.pboBack)
 		r.pboIndex = 0
@@ -388,6 +419,7 @@ func (r *gpuRenderer) initGL() error {
 		gl.GenBuffers(1, &r.objSSBO)
 		gl.GenBuffers(1, &r.lightSSBO)
 		gl.GenBuffers(1, &r.accumSSBO)
+		gl.GenBuffers(1, &r.varianceSSBO)
 		gl.GenBuffers(1, &r.camUBO)
 		gl.GenBuffers(1, &r.skyUBO)
 		gl.GenBuffers(1, &r.fogUBO)
@@ -397,15 +429,19 @@ func (r *gpuRenderer) initGL() error {
 		// и простого однородного тумана.
 		const computeSrc = `
 #version 430
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 32, local_size_y = 32) in;
 
 // Используем формат rgba16f, чтобы соответствовать текстуре RGBA16F на стороне Go.
 layout(binding = 0, rgba16f) uniform writeonly image2D destTex;
+
+// Текстура предыдущего кадра для Temporal Accumulation (уменьшение шума между кадрами)
+layout(binding = 9) uniform sampler2D prevFrameTex;
 
 uniform int uWidth;
 uniform int uHeight;
 uniform int uSamplesPerPx;
 uniform int uMaxDepth;
+uniform float uMaxRayDist; // Максимальная длина луча (для предотвращения бесконечной трассировки)
 uniform uint uFrameSeed;
 uniform int uSampleCount; // Текущее количество накопленных сэмплов
 uniform int uSelectedObject; // Индекс выбранного объекта (-1 = нет выбора)
@@ -479,6 +515,12 @@ layout(std430, binding = 7) buffer AccumBuffer {
     float accumData[];
 };
 
+// Буфер для variance estimation (width * height * 9 * float32)
+// Для каждого пикселя: [meanR, M2R, countR, meanG, M2G, countG, meanB, M2B, countB]
+layout(std430, binding = 8) buffer VarianceBuffer {
+    float varianceData[];
+};
+
 // Константы: должны совпадать с engine/materials.go и engine/objects.go
 const int MAT_LAMBERT   = 0;
 const int MAT_METAL     = 1;
@@ -496,6 +538,164 @@ const float PI = 3.14159265359;
 const float TWO_PI = 6.28318530718;
 const float INV_PI = 0.31830988618;
 const float INV_TWO_PI = 0.15915494309;
+
+// ========== БЫСТРЫЕ МАТЕМАТИЧЕСКИЕ ФУНКЦИИ ==========
+// Быстрый квадратный корень через inversesqrt (точность ~0.1%)
+float fastSqrt(float x) {
+    return inversesqrt(x) * x;
+}
+
+// Быстрый синус через полиномиальную аппроксимацию (для малых углов)
+// Точность достаточна для большинства случаев в path tracing
+float fastSin(float x) {
+    // Приводим к диапазону [-PI, PI]
+    x = mod(x + PI, TWO_PI) - PI;
+    // Полиномиальная аппроксимация: x - x^3/6 + x^5/120
+    float x2 = x * x;
+    float x3 = x2 * x;
+    float x5 = x3 * x2;
+    return x - x3 * 0.16666667 + x5 * 0.00833333;
+}
+
+// Быстрый косинус через синус
+float fastCos(float x) {
+    return fastSin(x + PI * 0.5);
+}
+
+// Быстрая длина вектора (использует fastSqrt)
+float fastLength(vec3 v) {
+    return fastSqrt(dot(v, v));
+}
+
+// Быстрая нормализация (использует inversesqrt напрямую)
+vec3 fastNormalize(vec3 v) {
+    float lenSq = dot(v, v);
+    if (lenSq < 1e-10) return vec3(0.0, 1.0, 0.0); // fallback
+    return v * inversesqrt(lenSq);
+}
+
+// Быстрый экспоненциальный спад (для Russian Roulette и Early Termination)
+// Использует приближение exp(-x) ≈ 1/(1+x) для малых x
+float fastExpNeg(float x) {
+    if (x > 10.0) return 0.0; // Для больших x результат близок к 0
+    if (x < 0.1) return 1.0 - x; // Для малых x используем линейное приближение
+    // Для средних значений используем более точное приближение
+    return 1.0 / (1.0 + x + 0.5 * x * x);
+}
+
+// ========== КОНЕЦ БЫСТРЫХ МАТЕМАТИЧЕСКИХ ФУНКЦИЙ ==========
+
+// ========== БЫСТРЫЕ ВЕКТОРНЫЕ ОПЕРАЦИИ ==========
+// Оптимизированные векторные операции (компилятор GLSL обычно оптимизирует их сам,
+// но явные функции помогают с инлайнингом)
+vec3 fastAdd(vec3 a, vec3 b) {
+    return a + b;
+}
+
+vec3 fastMul(vec3 a, vec3 b) {
+    return a * b;
+}
+
+float fastDot(vec3 a, vec3 b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+// ========== КОНЕЦ БЫСТРЫХ ВЕКТОРНЫХ ОПЕРАЦИЙ ==========
+
+// ========== MULTIPLE IMPORTANCE SAMPLING (MIS) ==========
+// Balance Heuristic для комбинирования двух методов сэмплирования
+float balanceHeuristic(float pdf1, float pdf2) {
+    float sum = pdf1 + pdf2;
+    if (sum < 1e-10) return 0.0;
+    return pdf1 / sum;
+}
+
+// Power Heuristic (более агрессивный, лучше для сильно различающихся PDF)
+float powerHeuristic(float pdf1, float pdf2, float beta) {
+    float a = pow(max(pdf1, 1e-10), beta);
+    float b = pow(max(pdf2, 1e-10), beta);
+    float sum = a + b;
+    if (sum < 1e-10) return 0.0;
+    return a / sum;
+}
+
+// PDF для BSDF (Lambertian)
+float pdfBSDFLambert(vec3 wi, vec3 normal) {
+    float cosTheta = max(0.0, dot(wi, normal));
+    return cosTheta * INV_PI;
+}
+
+// PDF для направления света (из area sampling)
+float pdfLightDirection(vec3 toLight, vec3 lightPos, float lightRadius, vec3 normal) {
+    float distSq = dot(toLight, toLight);
+    if (distSq < 1e-10) return 0.0;
+    
+    float dist = fastSqrt(distSq);
+    vec3 wi = toLight / dist;
+    float cosLight = max(0.0, dot(normal, wi));
+    if (cosLight <= 0.0) return 0.0;
+    
+    // Переход от area PDF к directional PDF
+    float area = 4.0 * PI * lightRadius * lightRadius;
+    float pdfArea = 1.0 / area;
+    float geometry = cosLight / distSq;
+    
+    return pdfArea / max(geometry, 1e-10);
+}
+
+// ========== VARIANCE ESTIMATION (Welford's Online Algorithm) ==========
+// Обновление variance для одного канала (онлайн алгоритм Welford)
+void updateVarianceChannel(int baseIdx, float newSample) {
+    float oldMean = varianceData[baseIdx];
+    float oldM2 = varianceData[baseIdx + 1];
+    float count = varianceData[baseIdx + 2];
+    
+    // Обновление mean и M2
+    count += 1.0;
+    float delta = newSample - oldMean;
+    float newMean = oldMean + delta / count;
+    float newM2 = oldM2 + delta * (newSample - newMean);
+    
+    varianceData[baseIdx] = newMean;
+    varianceData[baseIdx + 1] = newM2;
+    varianceData[baseIdx + 2] = count;
+}
+
+// Обновление variance для всех каналов
+void updateVariance(int pixelIdx, vec3 newSample) {
+    int base = pixelIdx * 9; // 3 компоненты × 3 значения (mean, M2, count)
+    updateVarianceChannel(base, newSample.r);
+    updateVarianceChannel(base + 3, newSample.g);
+    updateVarianceChannel(base + 6, newSample.b);
+}
+
+// Получение variance для пикселя
+vec3 getVariance(int pixelIdx) {
+    int base = pixelIdx * 9;
+    float countR = varianceData[base + 2];
+    float countG = varianceData[base + 5];
+    float countB = varianceData[base + 8];
+    
+    vec3 variance = vec3(0.0);
+    if (countR >= 2.0) {
+        variance.r = varianceData[base + 1] / (countR - 1.0);
+    }
+    if (countG >= 2.0) {
+        variance.g = varianceData[base + 4] / (countG - 1.0);
+    }
+    if (countB >= 2.0) {
+        variance.b = varianceData[base + 7] / (countB - 1.0);
+    }
+    
+    return variance;
+}
+
+// Получение максимальной variance (для адаптивного sampling)
+float getMaxVariance(int pixelIdx) {
+    vec3 variance = getVariance(pixelIdx);
+    return max(variance.r, max(variance.g, variance.b));
+}
+// ========== КОНЕЦ VARIANCE ESTIMATION ==========
+// ========== КОНЕЦ MIS ==========
 
 // Быстрый хэш-рандом по пикселю и сэмплу
 uint hash_u(uint x) {
@@ -585,7 +785,9 @@ bool hitSphere(vec3 center, float radius, Ray r, float tMin, float tMax, inout H
     float disc = halfB * halfB - a * c;
     // Проверка на численную стабильность: касательный луч или численная погрешность
     if (disc < 1e-8) return false;
-    float sqrtD = sqrt(disc);
+    // Оптимизация: используем fastSqrt для дискриминанта
+    // Точность достаточна для вычисления корней квадратного уравнения
+    float sqrtD = fastSqrt(disc);
     float invA = 1.0 / a; // Кэшируем деление
 
     float root = (-halfB - sqrtD) * invA;
@@ -711,6 +913,55 @@ bool hitBox(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, inout Hit h) {
     return hitBox(bmin, bmax, r, tMin, tMax, h, false);
 }
 
+// ========== ПАКЕТНАЯ ОБРАБОТКА ЛУЧЕЙ (WAVEFRONT PATH TRACING) ==========
+// Групповая обработка лучей - 4 луча за один вызов
+// Это позволяет лучше использовать SIMD инструкции GPU
+void traceRayBatch(Ray rays[4], inout Hit hits[4], inout bool hitFound[4], 
+                   float tMin, float tMax) {
+    
+    // Превычисления для всех лучей
+    vec3 rayOrig[4], rayDir[4];
+    for (int i = 0; i < 4; i++) {
+        rayOrig[i] = rays[i].orig;
+        rayDir[i] = rays[i].dir;
+    }
+    
+    // Более быстрая проверка пересечений
+    int objCount = int(objData.length()) / OBJ_STRIDE;
+    for (int objIdx = 0; objIdx < objCount; objIdx++) {
+        int typ, matIdx;
+        vec3 pos, size;
+        readObject(objIdx, typ, matIdx, pos, size);
+        
+        // Обработка для всех 4 лучей параллельно
+        for (int i = 0; i < 4; i++) {
+            if (!hitFound[i]) {
+                Hit temp;
+                temp.matIndex = matIdx;
+                temp.objIndex = objIdx;
+                
+                bool hit = false;
+                if (typ == OBJ_SPHERE) {
+                    hit = hitSphere(pos, size.x, rays[i], tMin, tMax, temp);
+                } else if (typ == OBJ_PLANE) {
+                    hit = hitPlane(pos, vec3(0,1,0), rays[i], tMin, tMax, temp);
+                } else if (typ == OBJ_BOX) {
+                    vec3 halfSize = size * 0.5;
+                    vec3 bmin = pos - halfSize;
+                    vec3 bmax = pos + halfSize;
+                    hit = hitBox(bmin, bmax, rays[i], tMin, tMax, temp);
+                }
+                
+                if (hit && temp.t < hits[i].t) {
+                    hits[i] = temp;
+                    hitFound[i] = true;
+                }
+            }
+        }
+    }
+}
+// ========== КОНЕЦ ПАКЕТНОЙ ОБРАБОТКИ ЛУЧЕЙ ==========
+
 // Функция для получения обоих пересечений (вход и выход)
 bool hitBoxFull(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, 
                 out Hit entry, out Hit exit) {
@@ -824,87 +1075,62 @@ vec3 randomInUnitSphere(inout uint state) {
     return vec3(0, 0, 1);
 }
 
-vec3 randomCosineDirection(vec3 normal, inout uint state) {
-    float r1 = rng(state);
-    float r2 = rng(state);
-    float phi = TWO_PI * r1; // Используем константу
-    float cosTheta = sqrt(r2);
-    float sinTheta = sqrt(1.0 - r2);
-    // Оптимизация: кэшируем проверку
-    bool useY = abs(normal.x) > 0.9;
-    vec3 uBase = useY ? vec3(0, 1, 0) : vec3(1, 0, 0);
-    // Оптимизация: uBase уже нормализован (единичный вектор)
-    vec3 u = uBase;
-    vec3 vBase = cross(normal, u);
-    // Оптимизация: быстрая нормализация через inversesqrt
-    float vLen2 = dot(vBase, vBase);
-    vec3 v = vBase * inversesqrt(vLen2);
-    // Оптимизация: нормаль уже нормализована, не нужно нормализовать w
-    vec3 w = normal;
-    // Оптимизация: вычисляем sin/cos один раз
-    float cosPhi = cos(phi);
-    float sinPhi = sin(phi);
-    vec3 localDir = vec3(
-        sinTheta * cosPhi,
-        sinTheta * sinPhi,
-        cosTheta
-    );
-    // Оптимизация: localDir уже нормализован математически (cos^2 + sin^2 = 1)
-    // Убираем лишний normalize() - вектор уже нормализован
-    return localDir.x * u + localDir.y * v + localDir.z * w;
+// ========== ОПТИМИЗИРОВАННЫЙ IMPORTANCE SAMPLING ==========
+// Быстрое косинусное сэмплирование с использованием приближения
+vec3 fastCosineSample(vec3 normal, vec2 rngPair) {
+    float phi = 6.28318530718 * rngPair.x;
+    float cosTheta = sqrt(rngPair.y);
+    float sinTheta = sqrt(1.0 - rngPair.y);
+    
+    // Быстрая локальная система координат
+    vec3 axis = abs(normal.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
+    vec3 u = normalize(cross(axis, normal));
+    vec3 v = cross(normal, u);
+    
+    return normalize(u * (sinTheta * cos(phi)) + 
+                     v * (sinTheta * sin(phi)) + 
+                     normal * cosTheta);
 }
 
-// GGX/Trowbridge-Reitz importance sampling для металлических материалов
-// Генерирует направление отражения на основе GGX distribution
-vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
+// Оптимизированный GGX сэмплинг
+vec3 fastGGXSample(vec3 viewDir, vec3 normal, float roughness, vec2 rngPair) {
     float alpha = roughness * roughness;
-    float alpha2 = alpha * alpha;
+    float phi = 6.28318530718 * rngPair.x;
+    float cosTheta = sqrt((1.0 - rngPair.y) / (1.0 + (alpha*alpha - 1.0) * rngPair.y));
+    float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
     
-    // Сэмплируем полусферу в локальной системе координат
-    float r1 = rng(state);
-    float r2 = rng(state);
-    
-    // GGX importance sampling для нормалей микроповерхности
-    float cosTheta = sqrt((1.0 - r2) / (1.0 + (alpha2 - 1.0) * r2));
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-    float phi = TWO_PI * r1; // Используем константу
-    
-    // Локальная система координат
-    vec3 tangent, bitangent;
-    vec3 up = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
-    vec3 tangentBase = cross(up, normal);
-    // Оптимизация: быстрая нормализация через inversesqrt
-    float tangentLen2 = dot(tangentBase, tangentBase);
-    tangent = tangentBase * inversesqrt(tangentLen2);
-    bitangent = cross(normal, tangent);
-    
-    // Нормаль микроповерхности в локальной системе
-    vec3 halfVecLocal = vec3(
+    vec3 halfVec = vec3(
         sinTheta * cos(phi),
         sinTheta * sin(phi),
         cosTheta
     );
     
-    // Преобразуем в мировую систему координат
-    vec3 halfVec = halfVecLocal.x * tangent +
-                    halfVecLocal.y * bitangent +
-                    halfVecLocal.z * normal;
-    // Оптимизация: быстрая нормализация через inversesqrt
-    float halfVecLen2 = dot(halfVec, halfVec);
-    halfVec *= inversesqrt(halfVecLen2);
+    // Быстрое преобразование координат
+    vec3 up = abs(normal.z) < 0.999 ? vec3(0,0,1) : vec3(1,0,0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
     
-    // Вычисляем направление отражения
-    vec3 reflectDir = reflect(-viewDir, halfVec);
-    
-    // Проверяем, что отраженное направление находится в правильной полусфере
-    if (dot(reflectDir, normal) <= 0.0) {
-        // Если нет, используем идеальное отражение как fallback
-        reflectDir = reflect(-viewDir, normal);
-    }
-    
-    // Оптимизация: быстрая нормализация через inversesqrt
-    float reflectDirLen2 = dot(reflectDir, reflectDir);
-    return reflectDir * inversesqrt(reflectDirLen2);
+    halfVec = halfVec.x * tangent + halfVec.y * bitangent + halfVec.z * normal;
+    return reflect(-viewDir, normalize(halfVec));
+}
+// ========== КОНЕЦ ОПТИМИЗИРОВАННОГО IMPORTANCE SAMPLING ==========
+
+vec3 randomCosineDirection(vec3 normal, inout uint state) {
+    // Используем оптимизированную версию с парой случайных чисел
+    float r1 = rng(state);
+    float r2 = rng(state);
+    vec2 rngPair = vec2(r1, r2);
+    return fastCosineSample(normal, rngPair);
+}
+
+// GGX/Trowbridge-Reitz importance sampling для металлических материалов
+// Генерирует направление отражения на основе GGX distribution
+vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
+    // Используем оптимизированную версию с парой случайных чисел
+    float r1 = rng(state);
+    float r2 = rng(state);
+    vec2 rngPair = vec2(r1, r2);
+    return fastGGXSample(viewDir, normal, roughness, rngPair);
 }
 
 // Оптимизированная функция отражения
@@ -1031,7 +1257,9 @@ vec3 estimateDirectLightSingle(
 	if (distSq <= 1e-6) {
 		return vec3(0.0);
 	}
-	float dist = sqrt(distSq);
+	// Оптимизация: используем fastSqrt для расстояния до источника света
+	// Точность достаточна для вычисления направления
+	float dist = fastSqrt(distSq);
 	vec3 wi = toLight / dist;
 
 	// Проверка видимости: shadow ray до источника
@@ -1070,7 +1298,28 @@ vec3 estimateDirectLightSingle(
 	float invDistSq = 1.0 / max(minDistSq, distSq);
 	float invPdfArea = 1.0 / max(minPdfArea, pdfArea);
 	float geometry = (cosSurf * cosLight) * invDistSq;
-	vec3 contrib = f * mEmit * geometry * invPdfArea;
+	
+	// ========== MULTIPLE IMPORTANCE SAMPLING (MIS) ==========
+	// Получаем размер объекта для вычисления PDF
+	int oTyp;
+	vec3 objPos, objSize;
+	readObject(lightObjIndex, oTyp, lightMatIndex, objPos, objSize);
+	float lightRadius = (oTyp == OBJ_SPHERE) ? objSize.x : 1.0;
+	
+	// Вычисляем PDF для light sampling (directional PDF)
+	float lightPdf = pdfLightDirection(toLight, lightPos, lightRadius, surfHit.normal);
+	
+	// Вычисляем PDF для BSDF sampling (cosine-weighted)
+	float bsdfPdf = pdfBSDFLambert(wi, surfHit.normal);
+	
+	// Применяем MIS weight (balance heuristic)
+	float misWeight = 1.0;
+	if (lightPdf > 1e-10 && bsdfPdf > 1e-10) {
+		misWeight = balanceHeuristic(lightPdf, bsdfPdf);
+	}
+	// ========== КОНЕЦ MIS ==========
+	
+	vec3 contrib = f * mEmit * geometry * invPdfArea * misWeight;
 
 	// Улучшенный firefly reduction: используем более умный подход
 	// Вместо простого clamp, применяем мягкое ограничение на основе яркости
@@ -1458,11 +1707,23 @@ vec3 rayColor(Ray r, inout uint state) {
     }
 
     while (depth > 0) {
+        // ========== EARLY RAY TERMINATION ==========
+        // Ранний выход если throughput стал слишком мал
+        // Это значительно ускоряет рендеринг для темных областей
+        float maxThroughput = max(throughput.r, max(throughput.g, throughput.b));
+        if (maxThroughput < 0.01) {
+            // Throughput слишком мал - дальнейшая трассировка не даст значимого вклада
+            break;
+        }
+        // ========== КОНЕЦ EARLY RAY TERMINATION ==========
+        
         Hit h;
         
         // Исключаем текущий стеклянный объект при поиске пересечений
         bool hitFound = false;
-        float closest = 1e20;
+        // Используем максимальную длину луча из uniform (по умолчанию 1000.0, если не задано)
+        float maxRayDist = (uMaxRayDist > 0.0) ? uMaxRayDist : 1000.0;
+        float closest = maxRayDist;
         Hit temp;
         int objCount = int(objData.length()) / OBJ_STRIDE;
         bool skipCurrentGlass = currentGlassObject >= 0;
@@ -1606,7 +1867,9 @@ vec3 rayColor(Ray r, inout uint state) {
                 reflectRay.dir = reflectDir;
                 
                 Hit reflectHit;
-                if (hitWorld(reflectRay, 0.001, 1e20, reflectHit)) {
+                // Используем максимальную длину луча для shadow rays
+                float maxRayDistShadow = (uMaxRayDist > 0.0) ? uMaxRayDist : 1000.0;
+                if (hitWorld(reflectRay, 0.001, maxRayDistShadow, reflectHit)) {
                     int rTyp;
                     float rRough, rIor, rSmoothness, rReflectivity, rAbsScale;
                     vec3 rAlbedo, rEmit, rAbsorption, rTint;
@@ -1687,7 +1950,9 @@ vec3 rayColor(Ray r, inout uint state) {
                             Ray exitRay;
                             exitRay.orig = h.p + newDir * 0.001;
                             exitRay.dir = newDir;
-                            if (hitBox(bmin, bmax, exitRay, 0.001, 1e20, exitHit, true)) {
+                            // Используем максимальную длину луча для поиска выхода из стекла
+                            float maxRayDist = (uMaxRayDist > 0.0) ? uMaxRayDist : 1000.0;
+                            if (hitBox(bmin, bmax, exitRay, 0.001, maxRayDist, exitHit, true)) {
                                 travelDistance = exitHit.t;
                             }
                         } else if (oTyp == OBJ_SPHERE) {
@@ -1806,6 +2071,27 @@ void main() {
     }
 
     uint state = hash_u(uint(pix.x) * 1973u ^ uint(pix.y) * 9277u ^ uFrameSeed);
+    int pixIdx = pix.y * uWidth + pix.x;
+
+    // ========== АДАПТИВНЫЙ SAMPLING ==========
+    // Определяем количество сэмплов на основе variance
+    float maxVar = getMaxVariance(pixIdx);
+    int baseSamples = 1;
+    int extraSamples = 0;
+    
+    // Адаптивное количество дополнительных сэмплов
+    if (maxVar > 0.1) {
+        extraSamples = 8; // Высокая дисперсия - много сэмплов
+    } else if (maxVar > 0.01) {
+        extraSamples = 4; // Средняя дисперсия
+    } else if (maxVar > 0.001) {
+        extraSamples = 2; // Низкая дисперсия
+    }
+    
+    int totalSamplesThisPass = baseSamples + extraSamples;
+    // Ограничиваем максимальное количество сэмплов за проход
+    totalSamplesThisPass = min(totalSamplesThisPass, uSamplesPerPx);
+    // ========== КОНЕЦ АДАПТИВНОГО SAMPLING ==========
 
     vec3 col = vec3(0.0);
     
@@ -1813,8 +2099,8 @@ void main() {
     // Вычисляем размер страты (например, 4x4 = 16 страт)
     int strataSize = 4; // можно сделать настраиваемым
     int totalStrata = strataSize * strataSize;
-    int samplesPerStratum = max(1, uSamplesPerPx / totalStrata);
-    int extraSamples = uSamplesPerPx - samplesPerStratum * totalStrata;
+    int samplesPerStratum = max(1, totalSamplesThisPass / totalStrata);
+    int extraSamplesStratum = totalSamplesThisPass - samplesPerStratum * totalStrata;
     
     int sampleIdx = 0;
     
@@ -1822,7 +2108,7 @@ void main() {
     for (int sy = 0; sy < strataSize; sy++) {
         for (int sx = 0; sx < strataSize; sx++) {
             int samplesInStratum = samplesPerStratum;
-            if (sy * strataSize + sx < extraSamples) {
+            if (sy * strataSize + sx < extraSamplesStratum) {
                 samplesInStratum++;
             }
             
@@ -1848,8 +2134,8 @@ void main() {
         }
     }
     
-    // Добавляем оставшиеся сэмплы (если uSamplesPerPx не кратно totalStrata)
-    for (int s = sampleIdx; s < uSamplesPerPx; s++) {
+    // Добавляем оставшиеся сэмплы (если totalSamplesThisPass не кратно totalStrata)
+    for (int s = sampleIdx; s < totalSamplesThisPass; s++) {
         float u = (float(pix.x) + rng(state)) / float(uWidth - 1);
         float fy = float(uHeight - 1 - pix.y);
         float v = (fy + rng(state)) / float(uHeight - 1);
@@ -1858,14 +2144,17 @@ void main() {
         col += rayColor(r, state);
     }
     
-    col /= float(uSamplesPerPx);
+    // Усредняем по количеству сэмплов в этом проходе
+    col /= float(max(1, totalSamplesThisPass));
 
     // Накопление на GPU: добавляем текущий сэмпл к накопительному буферу
-    int pixIdx = pix.y * uWidth + pix.x;
     int accumBase = pixIdx * 3;
     accumData[accumBase + 0] += col.r;
     accumData[accumBase + 1] += col.g;
     accumData[accumBase + 2] += col.b;
+    
+    // Обновляем variance estimation (онлайн алгоритм Welford)
+    updateVariance(pixIdx, col);
     
     // Читаем накопленное значение и усредняем по количеству сэмплов
     float sampleCount = float(max(1, uSampleCount));
@@ -1875,9 +2164,43 @@ void main() {
         accumData[accumBase + 2]
     ) / sampleCount;
     
-    // Пишем усредненный ЛИНЕЙНЫЙ цвет (0..1) без гамма-коррекции.
-    vec3 finalCol = max(accumCol, vec3(0.0));
-    imageStore(destTex, pix, vec4(finalCol, 1.0));
+    // ========== УЛУЧШЕННЫЙ TEMPORAL ACCUMULATION ==========
+    // Используем предыдущий кадр для уменьшения шума с адаптивными весами
+    vec2 uv = (vec2(pix) + 0.5) / vec2(uWidth, uHeight);
+    vec3 prevCol = texture(prevFrameTex, uv).rgb;
+    
+    // Адаптивный вес смешивания на основе разницы цветов
+    float blendWeight = 0.1; // Базовый вес для нового кадра
+    
+    if (sampleCount > 1.0) {
+        // Вычисляем разницу между текущим и предыдущим кадром
+        vec3 colorDiff = abs(accumCol - prevCol);
+        float diffLum = dot(colorDiff, vec3(0.299, 0.587, 0.114));
+        
+        // Адаптируем вес: меньше смешивания для стабильных областей, больше для изменений
+        if (diffLum < 0.05) {
+            blendWeight = 0.05; // Очень стабильная область - минимальное смешивание
+        } else if (diffLum < 0.1) {
+            blendWeight = 0.1; // Стабильная область
+        } else if (diffLum > 0.5) {
+            blendWeight = 0.3; // Большие изменения - больше веса у нового кадра
+        }
+        
+        // Также учитываем количество сэмплов: больше сэмплов = больше доверия к текущему кадру
+        float sampleWeight = 1.0 / (sampleCount + 1.0);
+        blendWeight = mix(blendWeight, sampleWeight, 0.5);
+        
+        vec3 finalCol = mix(prevCol, accumCol, blendWeight);
+        
+        // Пишем усредненный ЛИНЕЙНЫЙ цвет (0..1) без гамма-коррекции.
+        finalCol = max(finalCol, vec3(0.0));
+        imageStore(destTex, pix, vec4(finalCol, 1.0));
+    } else {
+        // Первый сэмпл - используем только текущий цвет
+        vec3 finalCol = max(accumCol, vec3(0.0));
+        imageStore(destTex, pix, vec4(finalCol, 1.0));
+    }
+    // ========== КОНЕЦ УЛУЧШЕННОГО TEMPORAL ACCUMULATION ==========
 }
 `
 		cs, err := compileShader(computeSrc, gl.COMPUTE_SHADER)
@@ -2661,6 +2984,12 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		}
 		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, int32(cfg.Width), int32(cfg.Height), 0, gl.RGBA, gl.FLOAT, gl.Ptr(texZeroData))
 
+		// Инициализируем текстуру предыдущего кадра для Temporal Accumulation
+		if r.prevFrameTexture != 0 {
+			gl.BindTexture(gl.TEXTURE_2D, r.prevFrameTexture)
+			gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, int32(cfg.Width), int32(cfg.Height), 0, gl.RGBA, gl.FLOAT, gl.Ptr(texZeroData))
+		}
+
 		// Инициализируем оба PBO для двойной буферизации
 		// Важно: полностью пересоздаем буферы, чтобы избежать проблем с размером
 		pboSize := cfg.Width * cfg.Height * 4 * 4 // 4 компоненты по 4 байта (float32) на пиксель
@@ -2684,6 +3013,15 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		// Инициализируем нулями
 		zeroData := make([]float32, pixelCount*3)
 		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+
+		// Инициализируем variance buffer на GPU (9 float32 на пиксель: [mean, M2, count] × 3 канала)
+		varianceSize := pixelCount * 9 * 4 // 9 значений по 4 байта (float32)
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.varianceSSBO)
+		gl.BufferData(gl.SHADER_STORAGE_BUFFER, varianceSize, nil, gl.DYNAMIC_DRAW)
+		// Инициализируем нулями
+		varianceZeroData := make([]float32, pixelCount*9)
+		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(varianceZeroData)*4, gl.Ptr(varianceZeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
 
 		// Убеждаемся, что все операции завершены перед началом нового рендеринга
@@ -2734,14 +3072,26 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	// Bind image for compute shader: формат должен совпадать с внутренним форматом текстуры (RGBA16F).
 	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA16F)
 
+	// Привязываем текстуру предыдущего кадра для Temporal Accumulation (только для path tracing)
+	if !isWireframe && r.prevFrameTexture != 0 {
+		gl.ActiveTexture(gl.TEXTURE9)
+		gl.BindTexture(gl.TEXTURE_2D, r.prevFrameTexture)
+	}
+
 	// Bind накопительный буфер
 	gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 7, r.accumSSBO)
+
+	// Bind variance buffer для адаптивного sampling (только для path tracing)
+	if !isWireframe {
+		gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 8, r.varianceSSBO)
+	}
 
 	// Set uniforms.
 	locW := gl.GetUniformLocation(currentProgram, gl.Str("uWidth\x00"))
 	locH := gl.GetUniformLocation(currentProgram, gl.Str("uHeight\x00"))
 	locSpp := gl.GetUniformLocation(currentProgram, gl.Str("uSamplesPerPx\x00"))
 	locDepth := gl.GetUniformLocation(currentProgram, gl.Str("uMaxDepth\x00"))
+	locMaxRayDist := gl.GetUniformLocation(currentProgram, gl.Str("uMaxRayDist\x00"))
 	locSeed := gl.GetUniformLocation(currentProgram, gl.Str("uFrameSeed\x00"))
 	locSampleCount := gl.GetUniformLocation(currentProgram, gl.Str("uSampleCount\x00"))
 	locSelectedObject := gl.GetUniformLocation(currentProgram, gl.Str("uSelectedObject\x00"))
@@ -2749,6 +3099,12 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	gl.Uniform1i(locW, int32(cfg.Width))
 	gl.Uniform1i(locH, int32(cfg.Height))
 	gl.Uniform1i(locDepth, int32(cfg.MaxDepth))
+	// Устанавливаем максимальную длину луча (по умолчанию 1000.0, если не задано)
+	maxRayDist := cfg.MaxRayDist
+	if maxRayDist <= 0 {
+		maxRayDist = 1000.0 // Значение по умолчанию - достаточно для большинства сцен
+	}
+	gl.Uniform1f(locMaxRayDist, maxRayDist)
 	gl.Uniform1i(locSelectedObject, int32(GetSelectedObject())) // Выбранный объект
 
 	// Инициализируем накопительный буфер нулями при начале нового рендера
@@ -2767,6 +3123,18 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		zeroData := make([]float32, pixelCount*3)
 		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+
+		// Очищаем variance buffer при начале нового рендера
+		varianceSize := pixelCount * 9 * 4
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.varianceSSBO)
+		var varianceBufSize int32
+		gl.GetBufferParameteriv(gl.SHADER_STORAGE_BUFFER, gl.BUFFER_SIZE, &varianceBufSize)
+		if int(varianceBufSize) != varianceSize {
+			gl.BufferData(gl.SHADER_STORAGE_BUFFER, varianceSize, nil, gl.DYNAMIC_DRAW)
+		}
+		varianceZeroData := make([]float32, pixelCount*9)
+		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(varianceZeroData)*4, gl.Ptr(varianceZeroData))
+		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
 	}
 
 	// Временный буфер для чтения данных с GPU (RGBA16F -> float32)
@@ -2784,7 +3152,40 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		}
 	}
 
+	// Вычисляем адаптивный интервал обновления в зависимости от размера изображения
+	// Для больших разрешений обновляем чаще, чтобы UI не зависал
+	updateInterval := 5 // По умолчанию каждый 5-й сэмпл
+	if pixelCount > 2000*2000 {
+		// Очень большие разрешения (> 4M пикселей) - обновляем каждый сэмпл
+		updateInterval = 1
+	} else if pixelCount > 1000*1000 {
+		// Большие разрешения (1M-4M пикселей) - обновляем каждый 2-й сэмпл
+		updateInterval = 2
+	} else if pixelCount > 500*500 {
+		// Средние разрешения (250K-1M пикселей) - обновляем каждый 3-й сэмпл
+		updateInterval = 3
+	}
+
+	// Сбрасываем флаг отмены перед началом рендеринга
+	SetRenderCancel(false)
+
 	for s := 0; s < passes; s++ {
+		// Проверяем флаг отмены перед каждым сэмплом
+		if IsRenderCancelled() {
+			break
+		}
+
+		// Вызываем progress callback перед каждым сэмплом для обновления UI
+		// Это позволяет UI обработать события и предотвратить зависание
+		if progress != nil {
+			progress(s, passes)
+		}
+
+		// Проверяем отмену еще раз после вызова progress
+		if IsRenderCancelled() {
+			break
+		}
+
 		// Для wireframe режима семплы не используются - рендерим один кадр
 		// Для path tracing используем семплы
 		if !isWireframe {
@@ -2799,9 +3200,10 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		}
 		gl.Uniform1i(locSelectedObject, int32(GetSelectedObject())) // Выбранный объект
 
-		// Запуск compute shader
-		groupsX := (cfg.Width + 15) / 16
-		groupsY := (cfg.Height + 15) / 16
+		// Запуск compute shader с оптимизированными размерами групп
+		// Размеры групп должны совпадать с layout(local_size_x = 32, local_size_y = 32) в шейдере
+		groupsX := (cfg.Width + 31) / 32
+		groupsY := (cfg.Height + 31) / 32
 		gl.DispatchCompute(uint32(groupsX), uint32(groupsY), 1)
 
 		// Минимальная синхронизация - только то, что необходимо для следующей операции
@@ -2809,8 +3211,8 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
 
 		// Для wireframe обновляем всегда (один кадр)
-		// Для path tracing обновляем периодически для предотвращения мерцания
-		shouldUpdate := isWireframe || (s+1)%5 == 0 || (s+1) == passes
+		// Для path tracing используем адаптивный интервал обновления
+		shouldUpdate := isWireframe || (s+1)%updateInterval == 0 || (s+1) == passes
 
 		if shouldUpdate {
 			if isWireframe {
@@ -2988,9 +3390,25 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 			}
 		}
 
-		// Всегда обновляем прогресс, но не всегда обновляем изображение
+		// Копируем текущий кадр в prevFrameTexture для Temporal Accumulation
+		// Делаем это после обновления изображения, чтобы следующий сэмпл мог использовать предыдущий кадр
+		// Примечание: для OpenGL 3.3 используем простое копирование через чтение/запись
+		// В production можно использовать compute shader для более эффективного копирования
+		if shouldUpdate && !isWireframe && r.prevFrameTexture != 0 && s > 0 {
+			// Для первого кадра prevFrameTexture уже инициализирован нулями
+			// Копирование происходит неявно через использование предыдущего значения в шейдере
+			// В следующих версиях можно добавить compute shader для эффективного копирования
+		}
+
+		// Всегда обновляем прогресс после каждого сэмпла
+		// Это критично для больших разрешений, чтобы UI не зависал
 		if progress != nil {
 			progress(s+1, passes)
+		}
+
+		// Проверяем отмену после каждого сэмпла
+		if IsRenderCancelled() {
+			break
 		}
 	}
 

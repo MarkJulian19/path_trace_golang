@@ -69,12 +69,16 @@ func Run(scenePath, mode string) error {
 		if sc.Settings.MaxDepth > 0 {
 			baseSettings.MaxDepth = sc.Settings.MaxDepth
 		}
+		if sc.Settings.MaxRayDist > 0 {
+			baseSettings.MaxRayDist = sc.Settings.MaxRayDist
+		}
 	}
 
 	previewSettings := baseSettings
 	finalSettings := baseSettings
 	finalSettings.SamplesPerPx *= 4
 	finalSettings.MaxDepth *= 2
+	// MaxRayDist остается одинаковым для preview и final
 
 	// максимальный размер области предпросмотра на экране (может быть изменён из UI)
 	maxDisplayW := float32(1024.0)
@@ -129,6 +133,7 @@ func Run(scenePath, mode string) error {
 			Height:       previewSettings.Height,
 			SamplesPerPx: previewSettings.SamplesPerPx,
 			MaxDepth:     previewSettings.MaxDepth,
+			MaxRayDist:   float32(previewSettings.MaxRayDist),
 		}
 		objIndex := pickObject(sc, cfg, x, y)
 		selectedObjectIndex = objIndex
@@ -303,12 +308,13 @@ func Run(scenePath, mode string) error {
 			if isWireframe && !final {
 				// Стримминг режим для wireframe
 				status.SetText("Streaming wireframe...")
-				cfg := engine.RenderConfig{
-					Width:        previewSettings.Width,
-					Height:       previewSettings.Height,
-					SamplesPerPx: 1, // Для wireframe достаточно 1 сэмпла
-					MaxDepth:     1, // Минимальная глубина для wireframe
-				}
+			cfg := engine.RenderConfig{
+				Width:        previewSettings.Width,
+				Height:       previewSettings.Height,
+				SamplesPerPx: 1, // Для wireframe достаточно 1 сэмпла
+				MaxDepth:     1, // Минимальная глубина для wireframe
+				MaxRayDist:   float32(previewSettings.MaxRayDist),
+			}
 
 				// Переинициализируем основной буфер, если логическое разрешение изменилось
 				mu.Lock()
@@ -406,6 +412,7 @@ func Run(scenePath, mode string) error {
 					Height:       finalSettings.Height,
 					SamplesPerPx: finalSettings.SamplesPerPx,
 					MaxDepth:     finalSettings.MaxDepth,
+					MaxRayDist:   float32(finalSettings.MaxRayDist),
 				}
 			} else {
 				cfg = engine.RenderConfig{
@@ -413,6 +420,7 @@ func Run(scenePath, mode string) error {
 					Height:       previewSettings.Height,
 					SamplesPerPx: previewSettings.SamplesPerPx,
 					MaxDepth:     previewSettings.MaxDepth,
+					MaxRayDist:   float32(previewSettings.MaxRayDist),
 				}
 			}
 
@@ -464,6 +472,10 @@ func Run(scenePath, mode string) error {
 					// проверяем, не был ли рендер отменён
 					select {
 					case <-stopCh:
+						// Устанавливаем флаг отмены для GPU рендерера
+						if engine.GetBackend() == engine.BackendGPU {
+							gpu.SetRenderCancel(true)
+						}
 						return
 					default:
 					}
@@ -481,9 +493,21 @@ func Run(scenePath, mode string) error {
 					elapsed := time.Since(startTime).Seconds()
 					renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
 
-					// Обновляем изображение только с ограниченной частотой для предотвращения мерцания
+					// Адаптивный интервал обновления изображения в зависимости от размера
+					// Для больших разрешений обновляем чаще, чтобы UI не зависал
+					pixelCount := cfg.Width * cfg.Height
+					updateInterval := minProgressUpdateInterval
+					if pixelCount > 2000*2000 {
+						// Очень большие разрешения - обновляем чаще (каждые 50ms)
+						updateInterval = 50 * time.Millisecond
+					} else if pixelCount > 1000*1000 {
+						// Большие разрешения - обновляем каждые 75ms
+						updateInterval = 75 * time.Millisecond
+					}
+
+					// Обновляем изображение с адаптивной частотой
 					now := time.Now()
-					if now.Sub(lastProgressUpdate) >= minProgressUpdateInterval || currentSample == totalSamples {
+					if now.Sub(lastProgressUpdate) >= updateInterval || currentSample == totalSamples {
 						imgCanvas.Refresh()
 						lastProgressUpdate = now
 					}
@@ -491,6 +515,17 @@ func Run(scenePath, mode string) error {
 			} else {
 				// Даже если live update выключен, обновляем прогресс
 				progress = func(currentSample, totalSamples int) {
+					// Проверяем отмену
+					select {
+					case <-stopCh:
+						// Устанавливаем флаг отмены для GPU рендерера
+						if engine.GetBackend() == engine.BackendGPU {
+							gpu.SetRenderCancel(true)
+						}
+						return
+					default:
+					}
+
 					if totalSamples < 1 {
 						totalSamples = 1
 					}
@@ -502,6 +537,18 @@ func Run(scenePath, mode string) error {
 
 					elapsed := time.Since(startTime).Seconds()
 					renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
+
+					// Для больших разрешений обновляем изображение даже если live update выключен
+					// чтобы предотвратить зависание UI
+					pixelCount := cfg.Width * cfg.Height
+					if pixelCount > 2000*2000 {
+						// Очень большие разрешения - обновляем каждые 200ms даже без live update
+						now := time.Now()
+						if now.Sub(lastProgressUpdate) >= 200*time.Millisecond || currentSample == totalSamples {
+							imgCanvas.Refresh()
+							lastProgressUpdate = now
+						}
+					}
 				}
 			}
 
@@ -510,6 +557,8 @@ func Run(scenePath, mode string) error {
 			if engine.GetBackend() == engine.BackendGPU {
 				gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
 				gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+				// Сбрасываем флаг отмены перед началом нового рендеринга
+				gpu.SetRenderCancel(false)
 			}
 
 			engine.RenderInto(sc, cfg, img, progress)
@@ -1169,6 +1218,8 @@ func Run(scenePath, mode string) error {
 	finalH := widget.NewEntry()
 	finalSpp := widget.NewEntry()
 	finalDepth := widget.NewEntry()
+	prevMaxRayDist := widget.NewEntry()
+	finalMaxRayDist := widget.NewEntry()
 
 	// --- Настройки тумана (Fog) для сцены ---
 	var fogDensityEntry *widget.Entry
@@ -1274,12 +1325,14 @@ func Run(scenePath, mode string) error {
 	prevH.SetText(strconv.Itoa(previewSettings.Height))
 	prevSpp.SetText(strconv.Itoa(previewSettings.SamplesPerPx))
 	prevDepth.SetText(strconv.Itoa(previewSettings.MaxDepth))
+	prevMaxRayDist.SetText(strconv.FormatFloat(previewSettings.MaxRayDist, 'f', 1, 64))
 	dispW.SetText(strconv.Itoa(int(maxDisplayW)))
 	dispH.SetText(strconv.Itoa(int(maxDisplayH)))
 	finalW.SetText(strconv.Itoa(finalSettings.Width))
 	finalH.SetText(strconv.Itoa(finalSettings.Height))
 	finalSpp.SetText(strconv.Itoa(finalSettings.SamplesPerPx))
 	finalDepth.SetText(strconv.Itoa(finalSettings.MaxDepth))
+	finalMaxRayDist.SetText(strconv.FormatFloat(finalSettings.MaxRayDist, 'f', 1, 64))
 
 	applySettings := widget.NewButton("Apply render settings", func() {
 		parseI := func(e *widget.Entry, def int) int {
@@ -1303,6 +1356,7 @@ func Run(scenePath, mode string) error {
 		oldFinalH := finalSettings.Height
 		oldFinalSpp := finalSettings.SamplesPerPx
 		oldFinalDepth := finalSettings.MaxDepth
+		oldFinalMaxRayDist := finalSettings.MaxRayDist
 
 		finalSettings.Width = parseI(finalW, finalSettings.Width)
 		finalSettings.Height = parseI(finalH, finalSettings.Height)
@@ -1311,7 +1365,8 @@ func Run(scenePath, mode string) error {
 
 		// Если параметры финального рендера изменились, очищаем сохранённое изображение
 		if oldFinalW != finalSettings.Width || oldFinalH != finalSettings.Height ||
-			oldFinalSpp != finalSettings.SamplesPerPx || oldFinalDepth != finalSettings.MaxDepth {
+			oldFinalSpp != finalSettings.SamplesPerPx || oldFinalDepth != finalSettings.MaxDepth ||
+			oldFinalMaxRayDist != finalSettings.MaxRayDist {
 			mu.Lock()
 			lastFinalImage = nil
 			mu.Unlock()
@@ -1320,11 +1375,15 @@ func Run(scenePath, mode string) error {
 		// Обновляем параметры тумана сцены (используется GPU path tracer).
 		parseF := func(e *widget.Entry, def float64) float64 {
 			v, err := strconv.ParseFloat(e.Text, 64)
-			if err != nil {
+			if err != nil || v <= 0 {
 				return def
 			}
 			return v
 		}
+		
+		// Парсим максимальную длину луча
+		previewSettings.MaxRayDist = parseF(prevMaxRayDist, previewSettings.MaxRayDist)
+		finalSettings.MaxRayDist = parseF(finalMaxRayDist, finalSettings.MaxRayDist)
 		if fogEnabledCheck.Checked {
 			density := parseF(fogDensityEntry, 0.0)
 			if density < 0 {
@@ -1428,7 +1487,8 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Width"), prevW,
 			widget.NewLabel("Height"), prevH,
 			widget.NewLabel("Samples"), prevSpp,
-			widget.NewLabel("Max depth"), prevDepth,
+			widget.NewLabel("Max reflections"), prevDepth,
+			widget.NewLabel("Max ray distance"), prevMaxRayDist,
 		),
 		widget.NewLabel("Preview display (on screen)"),
 		container.NewGridWithColumns(2,
@@ -1440,7 +1500,8 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Width"), finalW,
 			widget.NewLabel("Height"), finalH,
 			widget.NewLabel("Samples"), finalSpp,
-			widget.NewLabel("Max depth"), finalDepth,
+			widget.NewLabel("Max reflections"), finalDepth,
+			widget.NewLabel("Max ray distance"), finalMaxRayDist,
 		),
 		widget.NewLabel("Fog (GPU)"),
 		fogEnabledCheck,

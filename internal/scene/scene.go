@@ -90,10 +90,11 @@ type Object struct {
 
 // RenderSettings defines quality/performance parameters.
 type RenderSettings struct {
-	Width        int `json:"width"`
-	Height       int `json:"height"`
-	SamplesPerPx int `json:"samples_per_px"`
-	MaxDepth     int `json:"max_depth"`
+	Width        int     `json:"width"`
+	Height       int     `json:"height"`
+	SamplesPerPx int     `json:"samples_per_px"`
+	MaxDepth     int     `json:"max_depth"`
+	MaxRayDist   float64 `json:"max_ray_dist"` // Максимальная длина луча (для предотвращения бесконечной трассировки)
 }
 
 // Fog описывает туман / участвующую среду.

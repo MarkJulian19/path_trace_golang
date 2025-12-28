@@ -8,6 +8,9 @@
 \usepackage{amsthm}
 \usepackage{geometry}
 \usepackage{breqn}
+\usepackage{tikz}
+\usepackage{tikz-3dplot}
+\usetikzlibrary{arrows,arrows.meta,calc,decorations.pathmorphing,decorations.markings,positioning,3d}
 \allowdisplaybreaks
 \geometry{
     top=2cm,
@@ -274,6 +277,40 @@ x_5 &= x_4 \oplus (x_4 \gg 15) \\
 
 где $\mathbf{w}$ направлен от цели к позиции камеры (обратное направление взгляда), $\mathbf{u}$ --- вектор вправо, $\mathbf{v}$ --- вектор вверх.
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.2]
+    % Камера
+    \coordinate (cam) at (0,0);
+    \coordinate (target) at (4,0);
+    
+    % Векторы системы координат
+    \draw[->,thick,blue] (cam) -- ($(cam) + (-1.5,0)$) node[above] {$\mathbf{w}$};
+    \draw[->,thick,red] (cam) -- ($(cam) + (0,1.5)$) node[right] {$\mathbf{v}$};
+    \draw[->,thick,green!60!black] (cam) -- ($(cam) + (0.8,0.8)$) node[above left] {$\mathbf{u}$};
+    
+    % Камера (точка)
+    \fill[black] (cam) circle (2pt) node[below left] {$\mathbf{c}_{\text{pos}}$};
+    
+    % Цель
+    \fill[black] (target) circle (2pt) node[below] {$\mathbf{c}_{\text{target}}$};
+    \draw[dashed] (cam) -- (target);
+    
+    % Viewport
+    \draw[thick,orange] ($(target) + (-1,1)$) -- ($(target) + (1,1)$) -- ($(target) + (1,-1)$) -- ($(target) + (-1,-1)$) -- cycle;
+    \node[orange] at ($(target) + (0,1.3)$) {viewport};
+    
+    % Луч
+    \draw[->,thick,purple] (cam) -- ($(target) + (0.3,0.5)$) node[midway,above] {луч};
+    
+    % Угол FOV
+    \draw[dashed] (cam) -- ($(target) + (1,1)$);
+    \draw[dashed] (cam) -- ($(target) + (1,-1)$);
+    \draw[<->] ($(cam) + (0.5,0)$) arc (0:25:0.5) node[midway,right] {$\theta/2$};
+\end{tikzpicture}
+\caption{Система координат камеры и генерация луча}
+\end{figure}
+
 \subsection{Вычисление размеров viewport}
 
 Размеры viewport вычисляются на основе поля зрения (FOV) и соотношения сторон:
@@ -408,6 +445,37 @@ t = \frac{-b \pm \sqrt{\Delta}}{2a} = \frac{-b \pm \sqrt{\Delta}}{2}
 \mathbf{n} = \frac{\mathbf{r}(t) - \mathbf{c}}{r}
 \]
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.5]
+    % Сфера
+    \draw[thick,blue] (0,0) circle (1.5cm);
+    \coordinate (center) at (0,0);
+    \fill[black] (center) circle (1pt) node[below left] {$\mathbf{c}$};
+    
+    % Луч
+    \coordinate (rayStart) at (-2.5,-1);
+    \coordinate (hitPoint) at (0.8,1.2);
+    \draw[->,thick,red] (rayStart) -- (hitPoint);
+    \draw[->,thick,red,dashed] (hitPoint) -- ($(hitPoint) + 0.8*(hitPoint) - 0.8*(rayStart)$);
+    
+    % Точки
+    \fill[black] (rayStart) circle (1.5pt) node[below left] {$\mathbf{o}$};
+    \fill[red] (hitPoint) circle (1.5pt) node[above right] {$\mathbf{r}(t)$};
+    
+    % Нормаль
+    \draw[->,thick,green!60!black] (hitPoint) -- ($(hitPoint) + 0.6*(hitPoint) - 0.6*(center)$) node[midway,right] {$\mathbf{n}$};
+    
+    % Радиус
+    \draw[dashed] (center) -- (hitPoint);
+    \node at ($(center) + 0.5*(hitPoint) + (0.2,0.1)$) {$r$};
+    
+    % Вектор направления
+    \draw[->,thick,purple] ($(rayStart) + 0.3*(hitPoint) - 0.3*(rayStart)$) -- ($(rayStart) + 0.5*(hitPoint) - 0.5*(rayStart)$) node[midway,above] {$\mathbf{d}$};
+\end{tikzpicture}
+\caption{Пересечение луча со сферой}
+\end{figure}
+
 \subsection{Пересечение с плоскостью}
 
 Плоскость задается точкой $\mathbf{p}$ и нормалью $\mathbf{n}$ (нормализована). Уравнение плоскости:
@@ -437,6 +505,36 @@ t = \frac{(\mathbf{p} - \mathbf{o}) \cdot \mathbf{n}}{\mathbf{d} \cdot \mathbf{n
 \]
 
 Нормаль: $\mathbf{n}$ (уже известна).
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.3]
+    % Плоскость
+    \draw[thick,blue,fill=blue!20] (-2,-1) -- (2,-1) -- (2,1) -- (-2,1) -- cycle;
+    \coordinate (planePoint) at (0,0);
+    \fill[black] (planePoint) circle (1pt) node[below right] {$\mathbf{p}$};
+    
+    % Нормаль плоскости
+    \draw[->,thick,green!60!black] (planePoint) -- ($(planePoint) + (0,1.2)$) node[right] {$\mathbf{n}$};
+    
+    % Луч
+    \coordinate (rayStart) at (-2.5,0.5);
+    \coordinate (hitPoint) at (0,0);
+    \draw[->,thick,red] (rayStart) -- (hitPoint);
+    \draw[->,thick,red,dashed] (hitPoint) -- ($(hitPoint) + 1.2*(hitPoint) - 1.2*(rayStart)$);
+    
+    % Точки
+    \fill[black] (rayStart) circle (1.5pt) node[below left] {$\mathbf{o}$};
+    \fill[red] (hitPoint) circle (1.5pt) node[above left] {$\mathbf{hit}$};
+    
+    % Вектор направления
+    \draw[->,thick,purple] ($(rayStart) + 0.3*(hitPoint) - 0.3*(rayStart)$) -- ($(rayStart) + 0.5*(hitPoint) - 0.5*(rayStart)$) node[midway,above] {$\mathbf{d}$};
+    
+    % Угол
+    \draw[<->] ($(hitPoint) + (0.3,0)$) arc (0:90:0.3) node[midway,right] {$\theta$};
+\end{tikzpicture}
+\caption{Пересечение луча с плоскостью}
+\end{figure}
 
 \subsection{Пересечение с кубом (AABB)}
 
@@ -480,6 +578,39 @@ t_{\text{near}} < t_{\text{far}} \quad \text{и} \quad t_{\text{far}} > 0
 \]
 
 с соответствующим знаком в зависимости от направления.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.2]
+    % AABB
+    \draw[thick,blue,fill=blue!20] (-1.5,-1) rectangle (1.5,1);
+    \coordinate (bmin) at (-1.5,-1);
+    \coordinate (bmax) at (1.5,1);
+    
+    % Подписи
+    \node[below] at ($(bmin) + (0.75,0)$) {$b_{\min}$};
+    \node[above] at ($(bmax) + (-0.75,0)$) {$b_{\max}$};
+    
+    % Луч
+    \coordinate (rayStart) at (-2.5,-0.5);
+    \coordinate (hitPoint) at (-1.5,0);
+    \draw[->,thick,red] (rayStart) -- (hitPoint);
+    \draw[->,thick,red,dashed] (hitPoint) -- ($(hitPoint) + 1.5*(hitPoint) - 1.5*(rayStart)$);
+    
+    % Точки
+    \fill[black] (rayStart) circle (1.5pt) node[below left] {$\mathbf{o}$};
+    \fill[red] (hitPoint) circle (1.5pt) node[above left] {$t_{\text{near}}$};
+    
+    % Выход
+    \coordinate (exitPoint) at (1.5,0.3);
+    \fill[red] (exitPoint) circle (1.5pt) node[above right] {$t_{\text{far}}$};
+    \draw[dashed,red] (hitPoint) -- (exitPoint);
+    
+    % Нормаль
+    \draw[->,thick,green!60!black] (hitPoint) -- ($(hitPoint) + (-0.8,0)$) node[above] {$\mathbf{n}$};
+\end{tikzpicture}
+\caption{Пересечение луча с AABB (кубом)}
+\end{figure}
 
 \section{Материалы и BRDF}
 
@@ -534,6 +665,38 @@ D(\mathbf{h}) = \frac{\alpha^2}{\pi((\mathbf{n} \cdot \mathbf{h})^2(\alpha^2 - 1
 \omega_o = \text{reflect}(\omega_i, \mathbf{n}) = \omega_i - 2(\omega_i \cdot \mathbf{n})\mathbf{n}
 \]
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.5]
+    % Поверхность
+    \draw[thick,blue] (-2,0) -- (2,0);
+    \node[below] at (0,-0.2) {поверхность};
+    
+    % Нормаль
+    \draw[->,thick,green!60!black] (0,0) -- (0,1.5) node[right] {$\mathbf{n}$};
+    
+    % Падающий луч
+    \coordinate (incident) at (-1.2,1.2);
+    \draw[->,thick,red] (0,0) -- (incident) node[above left] {$\omega_i$};
+    
+    % Отраженный луч
+    \coordinate (reflected) at (1.2,1.2);
+    \draw[->,thick,orange] (0,0) -- (reflected) node[above right] {$\omega_o$};
+    
+    % Углы
+    \draw[<->] (0.3,0) arc (0:135:0.3) node[midway,above left] {$\theta_i$};
+    \draw[<->] (0.3,0) arc (0:45:0.3) node[midway,above right] {$\theta_o$};
+    
+    % Точка пересечения
+    \fill[black] (0,0) circle (1.5pt);
+    
+    % Половинный вектор (для GGX)
+    \coordinate (halfVec) at (0,1.5);
+    \draw[->,thick,purple,dashed] (0,0) -- (halfVec) node[right] {$\mathbf{h}$};
+\end{tikzpicture}
+\caption{Отражение луча от поверхности (зеркало/металл)}
+\end{figure}
+
 \subsection{Диэлектрический материал --- закон Снеллиуса и Френель}
 
 Для прозрачных материалов (стекло, вода) используется закон Снеллиуса:
@@ -578,6 +741,42 @@ R_0 = \left(\frac{\eta_2 - \eta_1}{\eta_2 + \eta_1}\right)^2
 \]
 
 Вероятность отражения используется для выбора между отражением и преломлением методом Монте-Карло.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.5]
+    % Граница сред
+    \draw[thick,blue] (-2,0) -- (2,0);
+    \node[above] at (-1,0.3) {$\eta_1$ (воздух)};
+    \node[below] at (-1,-0.3) {$\eta_2$ (стекло)};
+    
+    % Нормаль
+    \draw[->,thick,green!60!black] (0,0) -- (0,1.5) node[right] {$\mathbf{n}$};
+    
+    % Падающий луч
+    \coordinate (incident) at (-1.2,1.2);
+    \draw[->,thick,red] (0,0) -- (incident) node[above left] {$\omega_i$};
+    
+    % Отраженный луч
+    \coordinate (reflected) at (1.2,1.2);
+    \draw[->,thick,orange] (0,0) -- (reflected) node[above right] {отражение};
+    
+    % Преломленный луч
+    \coordinate (refracted) at (0.8,-1.0);
+    \draw[->,thick,purple] (0,0) -- (refracted) node[below right] {преломление};
+    
+    % Углы
+    \draw[<->] (0.3,0) arc (0:135:0.3) node[midway,above left] {$\theta_1$};
+    \draw[<->] (0.25,0) arc (0:-50:0.25) node[midway,right] {$\theta_2$};
+    
+    % Точка пересечения
+    \fill[black] (0,0) circle (1.5pt);
+    
+    % Закон Снеллиуса
+    \node[below] at (0,-2) {$\eta_1 \sin\theta_1 = \eta_2 \sin\theta_2$};
+\end{tikzpicture}
+\caption{Преломление и отражение (закон Снеллиуса)}
+\end{figure}
 
 \subsection{Поглощение света (Beer-Lambert закон)}
 
@@ -640,6 +839,41 @@ PDF по направлению:
 p(\omega) = \frac{\cos\theta}{\pi}
 \]
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.8]
+    % Полусфера
+    \draw[thick,blue] (0,0) arc (180:0:1.5);
+    \draw[thick,blue,dashed] (0,0) arc (180:360:1.5);
+    
+    % Нормаль
+    \draw[->,thick,green!60!black] (0,0) -- (0,1.5) node[right] {$\mathbf{n}$};
+    
+    % Локальная система координат
+    \draw[->,thick,red] (0,0) -- (1.2,0) node[below] {$\mathbf{u}$};
+    \draw[->,thick,orange] (0,0) -- (0.8,0.8) node[above right] {$\mathbf{v}$};
+    
+    % Сэмплированное направление
+    \coordinate (sampleDir) at (0.6,1.2);
+    \draw[->,thick,purple] (0,0) -- (sampleDir) node[above right] {$\omega_i$};
+    
+    % Угол theta
+    \draw[<->] (0.3,0) arc (0:63:0.3) node[midway,right] {$\theta$};
+    
+    % Косинусное распределение
+    \draw[thick,red] (0,0) -- (sampleDir);
+    \draw[dashed] (sampleDir) -- ($(sampleDir) - (0,1.2)$);
+    \node[right] at ($(sampleDir) + (0.2,-0.6)$) {$\cos\theta$};
+    
+    % Точка на поверхности
+    \fill[black] (0,0) circle (1.5pt);
+    
+    % Плотность вероятности
+    \node[below] at (0,-2) {Плотность: $p(\omega) = \frac{\cos\theta}{\pi}$};
+\end{tikzpicture}
+\caption{Cosine-weighted sampling для диффузных материалов}
+\end{figure}
+
 \subsection{GGX importance sampling для металлов}
 
 Для GGX распределения используется importance sampling нормалей микроповерхности:
@@ -687,6 +921,43 @@ L_{\text{direct}} = \frac{f_r(\omega_i, \omega_o) L_e \cos\theta_i \cos\theta_o}
 p(\omega) = \frac{p_A \cos\theta_o}{r^2}
 \]
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.3]
+    % Поверхность
+    \draw[thick,blue] (-2,-1.5) -- (2,-1.5);
+    \coordinate (surfacePoint) at (0,-1.5);
+    \fill[black] (surfacePoint) circle (1.5pt) node[below] {$\mathbf{x}$};
+    
+    % Нормаль поверхности
+    \draw[->,thick,green!60!black] (surfacePoint) -- ($(surfacePoint) + (0,0.8)$) node[right] {$\mathbf{n}$};
+    
+    % Источник света (сфера)
+    \coordinate (lightCenter) at (1.5,0.5);
+    \draw[thick,orange,fill=orange!30] (lightCenter) circle (0.4cm);
+    \fill[black] (lightCenter) circle (1pt) node[above] {$\mathbf{c}$};
+    
+    % Сэмплированная точка на источнике
+    \coordinate (lightPoint) at (1.7,0.7);
+    \fill[red] (lightPoint) circle (1.5pt) node[above right] {$\mathbf{p}$};
+    
+    % Нормаль источника
+    \draw[->,thick,orange] (lightPoint) -- ($(lightPoint) + 0.3*(lightPoint) - 0.3*(lightCenter)$) node[right] {$\mathbf{n}_L$};
+    
+    % Теневой луч
+    \draw[->,thick,red] (surfacePoint) -- (lightPoint);
+    \node[midway,above left] {$r$};
+    
+    % Углы
+    \draw[<->] ($(surfacePoint) + (0.2,0)$) arc (0:45:0.2) node[midway,right] {$\theta_i$};
+    \draw[<->] ($(lightPoint) + (-0.15,-0.15)$) arc (225:270:0.2) node[midway,below] {$\theta_o$};
+    
+    % Геометрический термин
+    \node[below] at (0,-2.5) {Геометрия: $\frac{\cos\theta_i \cos\theta_o}{r^2}$};
+\end{tikzpicture}
+\caption{Next Event Estimation (NEE) --- прямое сэмплирование источника света}
+\end{figure}
+
 \subsection{Сэмплирование точки на сфере-источнике}
 
 Для сферического источника света точка сэмплируется равномерно по поверхности:
@@ -706,6 +977,44 @@ PDF по площади:
 \[
 p_A = \frac{1}{4\pi R^2}
 \]
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.2]
+    % Камера
+    \coordinate (camera) at (-2.5,0);
+    \fill[black] (camera) circle (1.5pt) node[below] {камера};
+    
+    % Объекты
+    \draw[thick,blue,fill=blue!20] (-0.5,-0.5) rectangle (0.5,0.5);
+    \draw[thick,green!60!black,fill=green!20] (1.5,0) circle (0.4cm);
+    
+    % Path tracing путь
+    \coordinate (hit1) at (0,0.5);
+    \coordinate (hit2) at (1.5,0.4);
+    \coordinate (hit3) at (2.5,1.2);
+    
+    % Лучи
+    \draw[->,thick,red] (camera) -- (hit1);
+    \draw[->,thick,orange] (hit1) -- (hit2);
+    \draw[->,thick,purple] (hit2) -- (hit3);
+    \draw[->,thick,blue,dashed] (hit3) -- (3.5,2);
+    
+    % Точки пересечения
+    \fill[red] (hit1) circle (1.5pt) node[above left] {1};
+    \fill[orange] (hit2) circle (1.5pt) node[above] {2};
+    \fill[purple] (hit3) circle (1.5pt) node[above] {3};
+    
+    % Нормали
+    \draw[->,thick,green!60!black] (hit1) -- ($(hit1) + (0,0.5)$);
+    \draw[->,thick,green!60!black] (hit2) -- ($(hit2) + (0.3,0.3)$);
+    
+    % Throughput
+    \node[below] at (0,-1.5) {throughput уменьшается на каждом отскоке};
+    \draw[->] (0,-1.2) -- (0.5,-1.2) node[midway,below] {$\times$ attenuation};
+\end{tikzpicture}
+\caption{Path tracing --- трассировка случайного пути света}
+\end{figure}
 
 \section{Path Tracing алгоритм}
 
@@ -860,6 +1169,38 @@ L(d) = L_0 \exp(-\sigma_a d)
 L(d) = L_0 \exp\left(-\int_0^d \sigma_a(\mathbf{x} + t\omega) dt\right)
 \]
 
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.3]
+    % Камера
+    \coordinate (camera) at (-2,0);
+    \fill[black] (camera) circle (1.5pt) node[below] {камера};
+    
+    % Объемная среда (туман)
+    \draw[thick,blue,fill=blue!10,opacity=0.5] (-1,-1) rectangle (2,1.5);
+    \node[blue] at (0.5,0.25) {объемная среда};
+    
+    % Источник света
+    \coordinate (light) at (1.5,1);
+    \draw[thick,orange,fill=orange!50] (light) circle (0.2cm);
+    
+    % Луч через среду
+    \draw[->,thick,red] (camera) -- (2.5,0.5);
+    
+    % Сэмплы вдоль луча
+    \foreach \i in {0,1,2,3,4} {
+        \coordinate (sample) at ($(camera) + 0.2*\i*(2.5,0.5) + 0.2*\i*(0.1,0.1)$);
+        \fill[purple] (sample) circle (1pt);
+        \draw[->,thick,purple,dashed] (sample) -- (light);
+    }
+    
+    % Функция пропускания
+    \node[below] at (0.5,-1.5) {$T(d) = \exp(-\sigma_t d)$};
+    \draw[->,thick] (0.3,-1.2) -- (0.7,-1.2) node[midway,below] {ослабление};
+\end{tikzpicture}
+\caption{Объемное рассеяние --- single scattering в тумане}
+\end{figure}
+
 \section{Накопление и усреднение сэмплов}
 
 \subsection{Накопление сэмплов}
@@ -912,6 +1253,35 @@ L(d) = L_0 \exp\left(-\int_0^d \sigma_a(\mathbf{x} + t\omega) dt\right)
 \]
 
 Формат RGBA16F позволяет хранить значения вне диапазона [0, 1], что важно для HDR (High Dynamic Range) рендеринга.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=1.2]
+    % Изображение (пиксели)
+    \foreach \x in {0,1,2,3,4} {
+        \foreach \y in {0,1,2,3,4} {
+            \draw[thick] (\x,\y) rectangle ($(\x,\y) + (1,1)$);
+            \fill[blue!20] (\x,\y) rectangle ($(\x,\y) + (1,1)$);
+        }
+    }
+    
+    % Work groups (16x16)
+    \draw[thick,red] (0,0) rectangle (2,2);
+    \draw[thick,red] (2,0) rectangle (4,2);
+    \draw[thick,red] (0,2) rectangle (2,4);
+    \draw[thick,red] (2,2) rectangle (4,4);
+    
+    \node[red] at (1,1) {WG 1};
+    \node[red] at (3,1) {WG 2};
+    \node[red] at (1,3) {WG 3};
+    \node[red] at (3,3) {WG 4};
+    
+    % Подпись
+    \node[below] at (2.5,-0.5) {Work groups (16$\times$16 потоков каждый)};
+    \node[below] at (2.5,-0.8) {Каждый пиксель обрабатывается независимо};
+\end{tikzpicture}
+\caption{Распараллеливание: work groups и обработка пикселей}
+\end{figure}
 
 \section{Оптимизации}
 

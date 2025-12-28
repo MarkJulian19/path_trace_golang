@@ -46,6 +46,7 @@ type RenderConfig struct {
 	Height       int
 	SamplesPerPx int
 	MaxDepth     int
+	MaxRayDist   float32 // Максимальная длина луча (для предотвращения бесконечной трассировки)
 }
 
 // Render performs a simple path tracing render of the given scene and returns a new image.
@@ -283,6 +284,7 @@ func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 		Height:       cfg.Height,
 		SamplesPerPx: cfg.SamplesPerPx,
 		MaxDepth:     cfg.MaxDepth,
+		MaxRayDist:   cfg.MaxRayDist,
 	}
 	if err := gpu.Render(sc, gpuCfg, img, progress); err != nil {
 		// Логируем ошибку для отладки

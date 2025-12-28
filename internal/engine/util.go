@@ -30,6 +30,7 @@ func RenderSettingsForMode(mode string) scene.RenderSettings {
 			Height:       1080,
 			SamplesPerPx: 1000,
 			MaxDepth:     80,
+			MaxRayDist:   1000.0, // Максимальная длина луча по умолчанию
 		}
 	default:
 		return scene.RenderSettings{
@@ -37,6 +38,7 @@ func RenderSettingsForMode(mode string) scene.RenderSettings {
 			Height:       225,
 			SamplesPerPx: 20,
 			MaxDepth:     20,
+			MaxRayDist:   1000.0, // Максимальная длина луча по умолчанию
 		}
 	}
 }
