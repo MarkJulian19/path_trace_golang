@@ -16,6 +16,7 @@ func RenderScene(sc *scene.Scene, settings scene.RenderSettings) (image.Image, e
 		Height:       settings.Height,
 		SamplesPerPx: settings.SamplesPerPx,
 		MaxDepth:     settings.MaxDepth,
+		MaxRayDist:   float32(settings.MaxRayDist),
 	}
 	img := Render(sc, cfg)
 	return img, nil

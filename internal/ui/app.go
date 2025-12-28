@@ -733,6 +733,230 @@ func Run(scenePath, mode string) error {
 		applyCamera,
 	)
 
+	// --- Управление видео ---
+	// Начальная позиция камеры
+	startPosX := widget.NewEntry()
+	startPosY := widget.NewEntry()
+	startPosZ := widget.NewEntry()
+	startPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
+	startPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
+	startPosZ.SetText(fmt.Sprintf("%.2f", cam.Position.Z))
+
+	// Конечная позиция камеры
+	endPosX := widget.NewEntry()
+	endPosY := widget.NewEntry()
+	endPosZ := widget.NewEntry()
+	endPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
+	endPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
+	endPosZ.SetText(fmt.Sprintf("%.2f", cam.Position.Z))
+
+	// Начальный Target
+	startTargetX := widget.NewEntry()
+	startTargetY := widget.NewEntry()
+	startTargetZ := widget.NewEntry()
+	startTargetX.SetText(fmt.Sprintf("%.2f", cam.Target.X))
+	startTargetY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
+	startTargetZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
+
+	// Конечный Target
+	endTargetX := widget.NewEntry()
+	endTargetY := widget.NewEntry()
+	endTargetZ := widget.NewEntry()
+	endTargetX.SetText(fmt.Sprintf("%.2f", cam.Target.X))
+	endTargetY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
+	endTargetZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
+
+	// Время перемещения и FPS
+	durationEntry := widget.NewEntry()
+	durationEntry.SetText("5.0") // По умолчанию 5 секунд
+	fpsEntry := widget.NewEntry()
+	fpsEntry.SetText("30") // По умолчанию 30 FPS
+
+	// Путь сохранения видео
+	videoOutputPath := widget.NewEntry()
+	videoOutputPath.SetText("output_video.avi")
+
+	renderVideoBtn := widget.NewButton("Render Video", func() {
+		// Parse values from UI
+		parseF := func(e *widget.Entry, def float64) float64 {
+			v, err := strconv.ParseFloat(e.Text, 64)
+			if err != nil {
+				return def
+			}
+			return v
+		}
+		parseI := func(e *widget.Entry, def int) int {
+			v, err := strconv.ParseInt(e.Text, 10, 64)
+			if err != nil {
+				return def
+			}
+			return int(v)
+		}
+
+		// Create start and end cameras
+		startCam := scene.Camera{
+			Position: scene.Vec3{
+				X: parseF(startPosX, cam.Position.X),
+				Y: parseF(startPosY, cam.Position.Y),
+				Z: parseF(startPosZ, cam.Position.Z),
+			},
+			Target: scene.Vec3{
+				X: parseF(startTargetX, cam.Target.X),
+				Y: parseF(startTargetY, cam.Target.Y),
+				Z: parseF(startTargetZ, cam.Target.Z),
+			},
+			Up:          cam.Up,
+			FOV:         cam.FOV,
+			Aperture:    cam.Aperture,
+			FocusDist:   cam.FocusDist,
+			AspectRatio: cam.AspectRatio,
+		}
+
+		endCam := scene.Camera{
+			Position: scene.Vec3{
+				X: parseF(endPosX, cam.Position.X),
+				Y: parseF(endPosY, cam.Position.Y),
+				Z: parseF(endPosZ, cam.Position.Z),
+			},
+			Target: scene.Vec3{
+				X: parseF(endTargetX, cam.Target.X),
+				Y: parseF(endTargetY, cam.Target.Y),
+				Z: parseF(endTargetZ, cam.Target.Z),
+			},
+			Up:          cam.Up,
+			FOV:         cam.FOV,
+			Aperture:    cam.Aperture,
+			FocusDist:   cam.FocusDist,
+			AspectRatio: cam.AspectRatio,
+		}
+
+		duration := parseF(durationEntry, 5.0)
+		fps := parseI(fpsEntry, 30)
+		outputPath := videoOutputPath.Text
+		if outputPath == "" {
+			outputPath = "output_video.avi"
+		}
+
+		// Get render settings (use final settings for video)
+		cfg := engine.RenderConfig{
+			Width:        finalSettings.Width,
+			Height:       finalSettings.Height,
+			SamplesPerPx: finalSettings.SamplesPerPx,
+			MaxDepth:     finalSettings.MaxDepth,
+			MaxRayDist:   float32(finalSettings.MaxRayDist),
+		}
+
+		// Start video generation in goroutine
+		go func() {
+			mu.Lock()
+			// Save reference to imgCanvas for preview updates
+			previewCanvas := imgCanvas
+			previewImg := img
+			mu.Unlock()
+
+			// Update status
+			status.SetText("Rendering video frames...")
+			renderProgressBar.SetValue(0)
+			renderProgressBar.Show()
+
+			// Progress function with preview updates
+			lastPreviewUpdate := time.Now()
+			const minPreviewUpdateInterval = 100 * time.Millisecond
+
+			progress := func(currentFrame, totalFrames int, frameImg image.Image) {
+				// Update progress bar
+				progressValue := float64(currentFrame) / float64(totalFrames)
+				renderProgressBar.SetValue(progressValue)
+				renderTimeLabel.SetText(fmt.Sprintf("Frame %d/%d", currentFrame, totalFrames))
+
+				// Update preview window with current frame (throttled)
+				now := time.Now()
+				if now.Sub(lastPreviewUpdate) >= minPreviewUpdateInterval || currentFrame == totalFrames {
+					mu.Lock()
+					// Resize previewImg if needed
+					bounds := frameImg.Bounds()
+					if previewImg.Bounds().Dx() != bounds.Dx() || previewImg.Bounds().Dy() != bounds.Dy() {
+						previewImg = image.NewRGBA(bounds)
+					}
+
+					// Copy frame to preview image
+					for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+						for x := bounds.Min.X; x < bounds.Max.X; x++ {
+							previewImg.Set(x, y, frameImg.At(x, y))
+						}
+					}
+
+					previewCanvas.Image = previewImg
+					mu.Unlock()
+
+					// Update canvas - Refresh() is thread-safe in Fyne v2
+					previewCanvas.Refresh()
+
+					lastPreviewUpdate = now
+				}
+			}
+
+			// Render video sequence
+			frames, err := engine.RenderVideoSequence(
+				sc, startCam, endCam, duration, fps, cfg, progress,
+			)
+
+			if err != nil {
+				status.SetText(fmt.Sprintf("Video render error: %v", err))
+				return
+			}
+
+			// Update status
+			status.SetText("Creating video file...")
+
+			// Progress function for video creation
+			videoProgress := func(currentFrame, totalFrames int) {
+				progressValue := float64(currentFrame) / float64(totalFrames)
+				renderProgressBar.SetValue(progressValue)
+				renderTimeLabel.SetText(fmt.Sprintf("Encoding frame %d/%d", currentFrame, totalFrames))
+			}
+
+			// Create video
+			err = engine.CreateVideoFromFrames(frames, outputPath, float64(fps), videoProgress)
+
+			if err != nil {
+				status.SetText(fmt.Sprintf("Video creation error: %v", err))
+				return
+			}
+
+			renderProgressBar.SetValue(1.0)
+			status.SetText(fmt.Sprintf("Video saved to %s", outputPath))
+		}()
+	})
+
+	videoBox := container.NewVBox(
+		widget.NewLabel("Video Generation"),
+		widget.NewLabel("Start Camera"),
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Start Pos X"), startPosX,
+			widget.NewLabel("Start Pos Y"), startPosY,
+			widget.NewLabel("Start Pos Z"), startPosZ,
+			widget.NewLabel("Start Target X"), startTargetX,
+			widget.NewLabel("Start Target Y"), startTargetY,
+			widget.NewLabel("Start Target Z"), startTargetZ,
+		),
+		widget.NewLabel("End Camera"),
+		container.NewGridWithColumns(2,
+			widget.NewLabel("End Pos X"), endPosX,
+			widget.NewLabel("End Pos Y"), endPosY,
+			widget.NewLabel("End Pos Z"), endPosZ,
+			widget.NewLabel("End Target X"), endTargetX,
+			widget.NewLabel("End Target Y"), endTargetY,
+			widget.NewLabel("End Target Z"), endTargetZ,
+		),
+		container.NewGridWithColumns(2,
+			widget.NewLabel("Duration (s)"), durationEntry,
+			widget.NewLabel("FPS"), fpsEntry,
+			widget.NewLabel("Output Path"), videoOutputPath,
+		),
+		renderVideoBtn,
+	)
+
 	// --- Управление материалами (цвет и интенсивность света, цвет/шероховатость и т.п.) ---
 	materialIDs := make([]string, 0, len(sc.Materials))
 	for _, m := range sc.Materials {
@@ -1732,6 +1956,7 @@ func Run(scenePath, mode string) error {
 		container.NewHBox(previewBtn, finalBtn),
 		settingsBox,
 		cameraBox,
+		videoBox,
 		denoiseBox,
 		smoothBox,
 		container.NewGridWithColumns(2,
