@@ -13,6 +13,33 @@ import (
 	"github.com/user/pathtracer/internal/scene"
 )
 
+// Режим рендеринга для CPU: 0 = normal, 1 = wireframe
+var (
+	cpuRenderMode      int = 0
+	cpuRenderModeMutex sync.RWMutex
+)
+
+// SetCPURenderMode устанавливает режим рендеринга для CPU.
+// mode: 0 = normal, 1 = wireframe
+func SetCPURenderMode(mode int) {
+	cpuRenderModeMutex.Lock()
+	defer cpuRenderModeMutex.Unlock()
+	if mode < 0 {
+		mode = 0
+	}
+	if mode > 1 {
+		mode = 1
+	}
+	cpuRenderMode = mode
+}
+
+// GetCPURenderMode возвращает текущий режим рендеринга для CPU.
+func GetCPURenderMode() int {
+	cpuRenderModeMutex.RLock()
+	defer cpuRenderModeMutex.RUnlock()
+	return cpuRenderMode
+}
+
 // RenderConfig defines internal render parameters.
 type RenderConfig struct {
 	Width        int
@@ -31,7 +58,8 @@ func Render(sc *scene.Scene, cfg RenderConfig) image.Image {
 // RenderInto renders the scene into the provided image.
 // If progress is not nil, it will be called periodically from worker goroutines
 // after finishing a row to allow interactive preview.
-func RenderInto(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
+// progress(currentSample, totalSamples) - currentSample is the current sample being rendered (1-based), totalSamples is the total number of samples.
+func RenderInto(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) {
 	switch GetBackend() {
 	case BackendGPU:
 		renderIntoGPU(sc, cfg, img, progress)
@@ -41,7 +69,7 @@ func RenderInto(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress fun
 }
 
 // renderIntoCPU contains the original CPU implementation.
-func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
+func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) {
 	b := img.Bounds()
 	if b.Dx() != cfg.Width || b.Dy() != cfg.Height {
 		// basic safety: resize not supported, just return
@@ -156,8 +184,8 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 	}
 	close(tiles)
 
-	totalTiles := numTilesX * numTilesY
-	var processedTiles int
+	pixelCount := cfg.Width * cfg.Height
+	processedPixels := int64(0)
 	var progressMu sync.Mutex
 
 	for i := 0; i < workerCount; i++ {
@@ -169,6 +197,7 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 			localCam := newCamera(sc.Camera, cfg, localRng)
 
 			for t := range tiles {
+				tilePixels := (t.x1 - t.x0) * (t.y1 - t.y0)
 				for y := t.y0; y < t.y1; y++ {
 					yIdx := y * stride
 					flipY := heightMinus1 - float64(y)
@@ -222,16 +251,17 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 					}
 				}
 
-				// Обновляем прогресс после каждого тайла (примерно каждые 5% или при завершении)
+				// Обновляем прогресс после каждого тайла
 				if progress != nil {
 					progressMu.Lock()
-					processedTiles++
-					updateThreshold := max(1, totalTiles/20)
-					shouldUpdate := processedTiles%updateThreshold == 0 || processedTiles == totalTiles
-					progressMu.Unlock()
-					if shouldUpdate {
-						progress()
+					processedPixels += int64(tilePixels * cfg.SamplesPerPx)
+					currentSample := int(float64(processedPixels) / float64(pixelCount))
+					if currentSample > cfg.SamplesPerPx {
+						currentSample = cfg.SamplesPerPx
 					}
+					progressMu.Unlock()
+					// Обновляем прогресс после каждого тайла
+					progress(currentSample, cfg.SamplesPerPx)
 				}
 			}
 		}()
@@ -241,13 +271,13 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 
 	// Финальное обновление предпросмотра после завершения рендеринга
 	if progress != nil {
-		progress()
+		progress(cfg.SamplesPerPx, cfg.SamplesPerPx)
 	}
 }
 
 // renderIntoGPU executes GPU rendering using compute shaders.
 // If GPU path fails for any reason, it falls back to CPU renderer.
-func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) {
+func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) {
 	gpuCfg := gpu.RenderConfig{
 		Width:        cfg.Width,
 		Height:       cfg.Height,
@@ -302,7 +332,40 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 	}
 
 	if !hitAnything {
+		// Wireframe режим: черный фон
+		if GetCPURenderMode() == 1 {
+			return vec3{x: 0, y: 0, z: 0}
+		}
 		return background(r)
+	}
+
+	// Wireframe режим: рисуем только контуры объектов
+	if GetCPURenderMode() == 1 {
+		// Используем нормаль для определения краев
+		dirLen := math.Sqrt(r.dir.x*r.dir.x + r.dir.y*r.dir.y + r.dir.z*r.dir.z)
+		if dirLen > 0 {
+			viewDir := vec3{x: -r.dir.x / dirLen, y: -r.dir.y / dirLen, z: -r.dir.z / dirLen} // Направление к камере
+			edgeFactor := math.Abs(rec.normal.x*viewDir.x + rec.normal.y*viewDir.y + rec.normal.z*viewDir.z)
+			
+			// Для wireframe показываем только когда нормаль почти перпендикулярна направлению взгляда
+			edgeThreshold := 0.1 // Более строгий порог для четких контуров
+			if edgeFactor < edgeThreshold {
+				return vec3{x: 1.0, y: 1.0, z: 1.0} // Белый цвет для контуров
+			}
+			
+			// Также показываем грани кубов и плоскости
+			absNormalX := math.Abs(rec.normal.x)
+			absNormalY := math.Abs(rec.normal.y)
+			absNormalZ := math.Abs(rec.normal.z)
+			maxAxis := math.Max(math.Max(absNormalX, absNormalY), absNormalZ)
+			if maxAxis > 0.95 {
+				// Нормаль выровнена по одной из осей - это грань куба или плоскость
+				if edgeFactor < 0.5 {
+					return vec3{x: 0.8, y: 0.8, z: 0.8} // Светло-серый для граней
+				}
+			}
+		}
+		return vec3{x: 0, y: 0, z: 0} // Черный цвет для остального
 	}
 
 	emitted := rec.mat.emitted()
@@ -401,6 +464,88 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 		y: emitted.y + attenuation.y*nextColor.y,
 		z: emitted.z + attenuation.z*nextColor.z,
 	}
+}
+
+// PickObject выполняет raycast для определения объекта под курсором
+// Возвращает индекс объекта или -1, если объект не найден
+// Строит луч из камеры через указанную точку экрана и находит первый пересеченный объект
+func PickObject(sc *scene.Scene, cfg RenderConfig, x, y int) int {
+	// Ограничиваем координаты
+	if x < 0 {
+		x = 0
+	}
+	if x >= cfg.Width {
+		x = cfg.Width - 1
+	}
+	if y < 0 {
+		y = 0
+	}
+	if y >= cfg.Height {
+		y = cfg.Height - 1
+	}
+	
+	// Преобразуем координаты пикселя в UV координаты [0,1]
+	// Важно: используем точное преобразование координат, как в шейдере
+	// В шейдере: u = (float(pix.x) + stratumU) / float(uWidth - 1)
+	//             fy = float(uHeight - 1 - pix.y)
+	//             v = (fy + stratumV) / float(uHeight - 1)
+	// Для центра пикселя (без jitter): u = pix.x / (uWidth - 1), v = (uHeight - 1 - pix.y) / (uHeight - 1)
+	uCoord := float64(x) / float64(cfg.Width-1)
+	fy := float64(cfg.Height - 1 - y) // Инвертируем Y точно как в шейдере
+	vCoord := fy / float64(cfg.Height-1)
+	
+	// Создаем камеру для raycast - точно так же, как в buildCamera
+	aspect := float64(cfg.Width) / float64(cfg.Height)
+	if sc.Camera.AspectRatio != 0 {
+		aspect = sc.Camera.AspectRatio
+	}
+	
+	theta := sc.Camera.FOV * math.Pi / 180.0
+	h := math.Tan(theta / 2)
+	viewportHeight := 2.0 * h
+	viewportWidth := aspect * viewportHeight
+	
+	origin := v(sc.Camera.Position.X, sc.Camera.Position.Y, sc.Camera.Position.Z)
+	target := v(sc.Camera.Target.X, sc.Camera.Target.Y, sc.Camera.Target.Z)
+	up := v(sc.Camera.Up.X, sc.Camera.Up.Y, sc.Camera.Up.Z)
+	
+	w := origin.sub(target).unit()
+	uVec := up.cross(w).unit()
+	vVec := w.cross(uVec)
+	
+	focusDist := sc.Camera.FocusDist
+	if focusDist == 0 {
+		focusDist = origin.sub(target).length()
+	}
+	
+	horizontal := uVec.mul(viewportWidth * focusDist)
+	vertical := vVec.mul(viewportHeight * focusDist)
+	lowerLeftCorner := origin.sub(horizontal.div(2)).sub(vertical.div(2)).sub(w.mul(focusDist))
+	
+	// Создаем луч через точку (u, v) - точно так же, как в buildCamera
+	dir := lowerLeftCorner.add(horizontal.mul(uCoord)).add(vertical.mul(vCoord)).sub(origin)
+	ray := ray{orig: origin, dir: dir.unit()}
+	
+	// Преобразуем сцену в world для проверки пересечений
+	world := sceneToWorld(sc)
+	
+	// Проверяем пересечение со всеми объектами и находим БЛИЖАЙШИЙ (первый пересеченный)
+	closestT := math.MaxFloat64
+	closestObjIndex := -1
+	
+	for i := range sc.Objects {
+		var rec hitRecord
+		// Используем closestT как tMax для раннего выхода
+		if world[i].hit(ray, 0.001, closestT, &rec) {
+			// Нашли пересечение - проверяем, ближе ли оно
+			if rec.t < closestT && rec.t >= 0.001 {
+				closestT = rec.t
+				closestObjIndex = i
+			}
+		}
+	}
+	
+	return closestObjIndex
 }
 
 func (a vec3) mulVec(b vec3) vec3 {

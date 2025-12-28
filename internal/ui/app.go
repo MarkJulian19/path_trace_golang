@@ -49,6 +49,8 @@ func Run(scenePath, mode string) error {
 	defer log.SetOutput(originalLogWriter)
 
 	a := app.New()
+	// Применяем темную тему в стиле Blender
+	a.Settings().SetTheme(newBlenderDarkTheme())
 	w := a.NewWindow("Go Path Tracer")
 
 	sc, err := scene.Load(scenePath)
@@ -104,13 +106,167 @@ func Run(scenePath, mode string) error {
 	setCanvasSize()
 
 	status := widget.NewLabel("Idle")
-	fpsLabel := widget.NewLabel("FPS: -")
+	renderProgressBar := widget.NewProgressBar()
+	renderProgressBar.Hide()
+	renderTimeLabel := widget.NewLabel("Render time: -")
+
+	// Выбранный объект
+	var selectedObjectIndex int = -1
+
+	// Переменные для перетаскивания объектов
+	var isDragging bool = false
+	var dragStartX, dragStartY int
+	var dragStartObjPos scene.Vec3
+
+	// Объявляем startRender заранее, чтобы использовать в замыканиях
+	var startRender func(final bool)
+
+	// Создаем pickable canvas для обработки кликов и перетаскивания
+	pickableCanvas := newPickableCanvas(imgCanvas, func(x, y int) {
+		// Выполняем raycast для определения объекта
+		cfg := engine.RenderConfig{
+			Width:        previewSettings.Width,
+			Height:       previewSettings.Height,
+			SamplesPerPx: previewSettings.SamplesPerPx,
+			MaxDepth:     previewSettings.MaxDepth,
+		}
+		objIndex := pickObject(sc, cfg, x, y)
+		selectedObjectIndex = objIndex
+		if objIndex >= 0 {
+			status.SetText(fmt.Sprintf("Selected object: %d", objIndex))
+			// Устанавливаем выбранный объект для подсветки
+			if engine.GetBackend() == engine.BackendGPU {
+				gpu.SetSelectedObjectFromUI(objIndex)
+			}
+			// Сохраняем начальную позицию для перетаскивания
+			if objIndex < len(sc.Objects) {
+				dragStartObjPos = sc.Objects[objIndex].Position
+				dragStartX = x
+				dragStartY = y
+				isDragging = true
+			}
+			startRender(false) // Перезапускаем рендер для подсветки
+		} else {
+			status.SetText("No object selected")
+			// Снимаем выделение
+			if engine.GetBackend() == engine.BackendGPU {
+				gpu.SetSelectedObjectFromUI(-1)
+			}
+			isDragging = false
+			startRender(false)
+		}
+	}, func(x1, y1, x2, y2 int) {
+		// Обработка перетаскивания объекта
+		if !isDragging || selectedObjectIndex < 0 || selectedObjectIndex >= len(sc.Objects) {
+			return
+		}
+
+		// Вычисляем смещение в 3D пространстве
+		cfg := engine.RenderConfig{
+			Width:        previewSettings.Width,
+			Height:       previewSettings.Height,
+			SamplesPerPx: previewSettings.SamplesPerPx,
+			MaxDepth:     previewSettings.MaxDepth,
+		}
+
+		// Вычисляем смещение в мировых координатах на основе камеры
+		aspect := float64(cfg.Width) / float64(cfg.Height)
+		if sc.Camera.AspectRatio != 0 {
+			aspect = sc.Camera.AspectRatio
+		}
+		theta := sc.Camera.FOV * math.Pi / 180.0
+		h := math.Tan(theta / 2)
+		viewportHeight := 2.0 * h
+		viewportWidth := aspect * viewportHeight
+
+		focusDist := sc.Camera.FocusDist
+		if focusDist == 0 {
+			focusDist = math.Sqrt(
+				math.Pow(sc.Camera.Position.X-sc.Camera.Target.X, 2) +
+					math.Pow(sc.Camera.Position.Y-sc.Camera.Target.Y, 2) +
+					math.Pow(sc.Camera.Position.Z-sc.Camera.Target.Z, 2))
+		}
+
+		// Упрощенный подход: перемещаем объект в плоскости камеры
+		// Вычисляем смещение пикселей
+		dx := float64(x2 - dragStartX)
+		dy := float64(y2 - dragStartY)
+
+		// Вычисляем смещение в мировых координатах на основе viewport
+		scaleX := viewportWidth * focusDist / float64(cfg.Width)
+		scaleY := viewportHeight * focusDist / float64(cfg.Height)
+
+		// Вычисляем векторы камеры вручную
+		originX := sc.Camera.Position.X
+		originY := sc.Camera.Position.Y
+		originZ := sc.Camera.Position.Z
+		targetX := sc.Camera.Target.X
+		targetY := sc.Camera.Target.Y
+		targetZ := sc.Camera.Target.Z
+		upX := sc.Camera.Up.X
+		upY := sc.Camera.Up.Y
+		upZ := sc.Camera.Up.Z
+
+		// w = normalize(origin - target)
+		wX := originX - targetX
+		wY := originY - targetY
+		wZ := originZ - targetZ
+		wLen := math.Sqrt(wX*wX + wY*wY + wZ*wZ)
+		if wLen > 0 {
+			wX /= wLen
+			wY /= wLen
+			wZ /= wLen
+		}
+
+		// u = normalize(cross(up, w))
+		uX := upY*wZ - upZ*wY
+		uY := upZ*wX - upX*wZ
+		uZ := upX*wY - upY*wX
+		uLen := math.Sqrt(uX*uX + uY*uY + uZ*uZ)
+		if uLen > 0 {
+			uX /= uLen
+			uY /= uLen
+			uZ /= uLen
+		}
+
+		// v = cross(w, u)
+		var vX, vY, vZ float64
+		vX = wY*uZ - wZ*uY
+		vY = wZ*uX - wX*uZ
+		vZ = wX*uY - wY*uX
+		vLen := math.Sqrt(vX*vX + vY*vY + vZ*vZ)
+		if vLen > 0 {
+			vX /= vLen
+			vY /= vLen
+			vZ /= vLen
+		}
+
+		// Вычисляем смещение в мировых координатах
+		worldDx := dx * scaleX
+		worldDy := -dy * scaleY // Инвертируем Y
+
+		deltaX := uX*worldDx + vX*worldDy
+		deltaY := uY*worldDx + vY*worldDy
+		deltaZ := uZ*worldDx + vZ*worldDy
+
+		// Обновляем позицию объекта
+		obj := &sc.Objects[selectedObjectIndex]
+		obj.Position.X = dragStartObjPos.X + deltaX
+		obj.Position.Y = dragStartObjPos.Y + deltaY
+		obj.Position.Z = dragStartObjPos.Z + deltaZ
+
+		// Перезапускаем рендер
+		startRender(false)
+	})
 
 	var mu sync.Mutex
 	var stopCh chan struct{}
 	var renderTimer *time.Timer             // для debounce при быстрых изменениях
 	var lastFinalImage image.Image          // последнее отрендеренное финальное изображение
 	var lastFinalConfig engine.RenderConfig // параметры последнего финального рендера
+
+	// Настройка FPS для wireframe стримминга
+	wireframeFPS := 60.0
 
 	liveUpdate := widget.NewCheck("Live update while rendering", func(bool) {})
 	liveUpdate.SetChecked(true)
@@ -134,6 +290,113 @@ func Run(scenePath, mode string) error {
 	doRender := func(final bool) {
 		go func() {
 			log.Println("render goroutine started, final =", final)
+
+			// Проверяем, включен ли wireframe режим для стримминга
+			isWireframe := false
+			if engine.GetBackend() == engine.BackendGPU {
+				isWireframe = (gpu.GetRenderMode() == 1)
+			} else {
+				isWireframe = (engine.GetCPURenderMode() == 1)
+			}
+
+			// Для wireframe режима используем стримминг вместо покадрового рендеринга
+			if isWireframe && !final {
+				// Стримминг режим для wireframe
+				status.SetText("Streaming wireframe...")
+				cfg := engine.RenderConfig{
+					Width:        previewSettings.Width,
+					Height:       previewSettings.Height,
+					SamplesPerPx: 1, // Для wireframe достаточно 1 сэмпла
+					MaxDepth:     1, // Минимальная глубина для wireframe
+				}
+
+				// Переинициализируем основной буфер, если логическое разрешение изменилось
+				mu.Lock()
+				if img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
+					img = image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
+					imgCanvas.Image = img
+					// Инициализируем темным серым (фон wireframe)
+					for y := 0; y < cfg.Height; y++ {
+						for x := 0; x < cfg.Width; x++ {
+							img.Set(x, y, color.RGBA{25, 25, 25, 255})
+						}
+					}
+				}
+				mu.Unlock()
+
+				// Вычисляем интервал между кадрами
+				mu.Lock()
+				currentFPS := wireframeFPS
+				mu.Unlock()
+				frameDuration := time.Duration(float64(time.Second) / currentFPS)
+				ticker := time.NewTicker(frameDuration)
+				defer ticker.Stop()
+
+				// Стримминг цикл с правильной двойной буферизацией
+				for {
+					select {
+					case <-stopCh:
+						status.SetText("Streaming stopped")
+						return
+					case <-ticker.C:
+						// Проверяем, не был ли рендер отменён
+						select {
+						case <-stopCh:
+							status.SetText("Streaming stopped")
+							return
+						default:
+						}
+
+						// Проверяем, что мы всё ещё в wireframe режиме
+						mu.Lock()
+						currentIsWireframe := false
+						if engine.GetBackend() == engine.BackendGPU {
+							currentIsWireframe = (gpu.GetRenderMode() == 1)
+						} else {
+							currentIsWireframe = (engine.GetCPURenderMode() == 1)
+						}
+						mu.Unlock()
+
+						// Если режим изменился, выходим из стримминга
+						if !currentIsWireframe {
+							status.SetText("Mode changed, stopping stream")
+							return
+						}
+
+						progress := func(currentSample, totalSamples int) {
+							// Не обновляем во время рендеринга для предотвращения мерцания
+						}
+
+						// Рендерим напрямую в основной буфер
+						// Важно: получаем ссылку на изображение под блокировкой
+						mu.Lock()
+						renderImg := img // Сохраняем ссылку на изображение
+						mu.Unlock()
+
+						// Рендерим без блокировки мьютекса - это позволяет другим операциям работать
+						engine.RenderInto(sc, cfg, renderImg, progress)
+
+						// Обновляем UI безопасно - Refresh() потокобезопасен в Fyne
+						// но нужно убедиться, что img не изменяется во время обновления
+						mu.Lock()
+						imgCanvas.Refresh()
+						mu.Unlock()
+
+						// Обновляем FPS если изменился
+						mu.Lock()
+						currentFPS := wireframeFPS
+						mu.Unlock()
+						newFrameDuration := time.Duration(float64(time.Second) / currentFPS)
+						if newFrameDuration != frameDuration {
+							frameDuration = newFrameDuration
+							ticker.Stop()
+							ticker = time.NewTicker(frameDuration)
+						}
+					}
+				}
+			}
+
+			// Обычный покадровый рендеринг для normal режима или final рендеринга
 			status.SetText("Rendering...")
 			startTime := time.Now()
 			var cfg engine.RenderConfig
@@ -159,24 +422,86 @@ func Run(scenePath, mode string) error {
 				img = image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
 				imgCanvas.Image = img
 			}
-			// очистить изображение перед новым рендером
-			for y := 0; y < cfg.Height; y++ {
-				for x := 0; x < cfg.Width; x++ {
-					img.Set(x, y, color.RGBA{0, 0, 0, 255})
+			// Для wireframe режима не очищаем изображение, чтобы избежать мерцания
+			// Для normal режима очищаем перед новым рендером
+			// Проверяем режим рендеринга
+			shouldClearImage := true
+			if engine.GetBackend() == engine.BackendGPU {
+				if gpu.GetRenderMode() == 1 {
+					shouldClearImage = false
+				}
+			} else {
+				if engine.GetCPURenderMode() == 1 {
+					shouldClearImage = false
+				}
+			}
+			if shouldClearImage {
+				// очистить изображение перед новым рендером только для normal режима
+				for y := 0; y < cfg.Height; y++ {
+					for x := 0; x < cfg.Width; x++ {
+						img.Set(x, y, color.RGBA{0, 0, 0, 255})
+					}
 				}
 			}
 			mu.Unlock()
 
-			var progress func()
+			// Инициализируем прогресс-бар
+			totalSamples := cfg.SamplesPerPx
+			if totalSamples < 1 {
+				totalSamples = 1
+			}
+
+			renderProgressBar.SetValue(0)
+			renderProgressBar.Show()
+			renderTimeLabel.SetText("Render time: 0.00s")
+
+			var progress func(currentSample, totalSamples int)
+			lastProgressUpdate := time.Now()
+			const minProgressUpdateInterval = 100 * time.Millisecond // Минимальный интервал между обновлениями UI
+
 			if liveUpdate.Checked {
-				progress = func() {
+				progress = func(currentSample, totalSamples int) {
 					// проверяем, не был ли рендер отменён
 					select {
 					case <-stopCh:
 						return
 					default:
 					}
-					imgCanvas.Refresh()
+
+					// Обновляем прогресс-бар и время
+					if totalSamples < 1 {
+						totalSamples = 1
+					}
+					if currentSample > totalSamples {
+						currentSample = totalSamples
+					}
+					progressValue := float64(currentSample) / float64(totalSamples)
+					renderProgressBar.SetValue(progressValue)
+
+					elapsed := time.Since(startTime).Seconds()
+					renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
+
+					// Обновляем изображение только с ограниченной частотой для предотвращения мерцания
+					now := time.Now()
+					if now.Sub(lastProgressUpdate) >= minProgressUpdateInterval || currentSample == totalSamples {
+						imgCanvas.Refresh()
+						lastProgressUpdate = now
+					}
+				}
+			} else {
+				// Даже если live update выключен, обновляем прогресс
+				progress = func(currentSample, totalSamples int) {
+					if totalSamples < 1 {
+						totalSamples = 1
+					}
+					if currentSample > totalSamples {
+						currentSample = totalSamples
+					}
+					progressValue := float64(currentSample) / float64(totalSamples)
+					renderProgressBar.SetValue(progressValue)
+
+					elapsed := time.Since(startTime).Seconds()
+					renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
 				}
 			}
 
@@ -215,9 +540,8 @@ func Run(scenePath, mode string) error {
 			}
 
 			elapsed := time.Since(startTime).Seconds()
-			if elapsed > 0 {
-				fpsLabel.SetText(fmt.Sprintf("FPS: %.2f", 1.0/elapsed))
-			}
+			renderProgressBar.SetValue(1.0)
+			renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
 			status.SetText("Done")
 			log.Println("render finished")
 		}()
@@ -231,7 +555,7 @@ func Run(scenePath, mode string) error {
 	}
 
 	// Обёртка startRender с debounce для preview рендеринга
-	startRender := func(final bool) {
+	startRender = func(final bool) {
 		mu.Lock()
 		// отменяем предыдущий таймер, если он есть (debounce)
 		if renderTimer != nil {
@@ -245,11 +569,11 @@ func Run(scenePath, mode string) error {
 		stopCh = make(chan struct{})
 		mu.Unlock()
 
-		// Для preview рендеринга добавляем debounce (200ms), чтобы не запускать
+		// Для preview рендеринга добавляем debounce (300ms), чтобы не запускать
 		// рендер при каждом нажатии клавиши, а только после паузы.
 		if !final {
 			mu.Lock()
-			renderTimer = time.AfterFunc(200*time.Millisecond, func() {
+			renderTimer = time.AfterFunc(300*time.Millisecond, func() {
 				mu.Lock()
 				renderTimer = nil
 				mu.Unlock()
@@ -291,6 +615,8 @@ func Run(scenePath, mode string) error {
 	camLookY := widget.NewEntry()
 	camLookZ := widget.NewEntry()
 	camFOV := widget.NewEntry()
+	camAperture := widget.NewEntry()
+	camFocusDist := widget.NewEntry()
 
 	camPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
 	camPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
@@ -299,6 +625,17 @@ func Run(scenePath, mode string) error {
 	camLookY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
 	camLookZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
 	camFOV.SetText(fmt.Sprintf("%.1f", cam.FOV))
+	camAperture.SetText(fmt.Sprintf("%.3f", cam.Aperture))
+	if cam.FocusDist == 0 {
+		// Если focus_dist не задан, вычисляем автоматически
+		dist := math.Sqrt(
+			math.Pow(cam.Position.X-cam.Target.X, 2) +
+				math.Pow(cam.Position.Y-cam.Target.Y, 2) +
+				math.Pow(cam.Position.Z-cam.Target.Z, 2))
+		camFocusDist.SetText(fmt.Sprintf("%.2f", dist))
+	} else {
+		camFocusDist.SetText(fmt.Sprintf("%.2f", cam.FocusDist))
+	}
 
 	applyCamera := widget.NewButton("Apply camera", func() {
 		parseF := func(e *widget.Entry, def float64) float64 {
@@ -315,6 +652,14 @@ func Run(scenePath, mode string) error {
 		cam.Target.Y = parseF(camLookY, cam.Target.Y)
 		cam.Target.Z = parseF(camLookZ, cam.Target.Z)
 		cam.FOV = parseF(camFOV, cam.FOV)
+		cam.Aperture = parseF(camAperture, cam.Aperture)
+		if cam.Aperture < 0 {
+			cam.Aperture = 0 // Апертура не может быть отрицательной
+		}
+		cam.FocusDist = parseF(camFocusDist, cam.FocusDist)
+		if cam.FocusDist < 0 {
+			cam.FocusDist = 0 // 0 означает автоматическое вычисление
+		}
 		sc.Camera = cam
 		clearFinalImage() // очищаем сохранённое финальное изображение при изменении камеры
 		status.SetText("Camera updated")
@@ -331,7 +676,11 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Look Y"), camLookY,
 			widget.NewLabel("Look Z"), camLookZ,
 			widget.NewLabel("FOV"), camFOV,
+			widget.NewLabel("Aperture"), camAperture,
+			widget.NewLabel("Focus Dist"), camFocusDist,
 		),
+		widget.NewLabel("Aperture: 0 = DOF off, >0 = depth of field"),
+		widget.NewLabel("Focus Dist: 0 = auto (distance to target)"),
 		applyCamera,
 	)
 
@@ -1259,40 +1608,108 @@ func Run(scenePath, mode string) error {
 		applySmoothBtn,
 	)
 
-	controls := container.NewVBox(
-		widget.NewLabel("Controls"),
-		liveUpdate,
+	// Левая панель: объекты и материалы
+	leftPanelContent := container.NewVBox(
+		widget.NewLabel("Scene"),
+		objectsBox,
+		objectForm,
+		materialsBox,
+		materialForm,
+	)
+	leftPanel := container.NewVScroll(leftPanelContent)
+	leftPanel.SetMinSize(fyne.NewSize(250, 0)) // Минимальная ширина для панели
+
+	// Настройка FPS для wireframe стримминга
+	wireframeFPSLabel := widget.NewLabel(fmt.Sprintf("Wireframe FPS: %.0f", wireframeFPS))
+	wireframeFPSSlider := widget.NewSlider(10, 120)
+	wireframeFPSSlider.Value = wireframeFPS
+	wireframeFPSSlider.Step = 1
+	wireframeFPSSlider.OnChanged = func(v float64) {
+		mu.Lock()
+		wireframeFPS = v
+		mu.Unlock()
+		wireframeFPSLabel.SetText(fmt.Sprintf("Wireframe FPS: %.0f", wireframeFPS))
+	}
+
+	// Режим отображения: Normal или Wireframe
+	renderModeSelect := widget.NewRadioGroup([]string{"Normal", "Wireframe"}, func(selected string) {
+		// Останавливаем текущий рендеринг
+		mu.Lock()
+		if stopCh != nil {
+			close(stopCh)
+			stopCh = nil
+		}
+		mu.Unlock()
+
+		mode := 0
+		if selected == "Wireframe" {
+			mode = 1
+		}
+		if engine.GetBackend() == engine.BackendGPU {
+			gpu.SetRenderModeFromUI(mode)
+		} else {
+			engine.SetCPURenderMode(mode)
+		}
+		startRender(false)
+	})
+	renderModeSelect.SetSelected("Normal")
+
+	// Правая панель: настройки рендеринга, камера, денойзинг
+	rightPanelContent := container.NewVBox(
+		widget.NewLabel("Render Settings"),
 		container.NewVBox(
 			widget.NewLabel("Compute backend"),
 			backendLabel,
 			backendSlider,
 		),
-		denoiseBox,
-		smoothBox,
+		widget.NewLabel("Display Mode"),
+		renderModeSelect,
+		wireframeFPSLabel,
+		wireframeFPSSlider,
+		liveUpdate,
 		camControlCheck,
 		container.NewHBox(previewBtn, finalBtn),
+		settingsBox,
+		cameraBox,
+		denoiseBox,
+		smoothBox,
 		container.NewGridWithColumns(2,
 			widget.NewLabel("Scene / Image path"), outputPath,
 		),
 		container.NewHBox(saveBtn, saveImageBtn),
+	)
+	rightPanel := container.NewVScroll(rightPanelContent)
+	rightPanel.SetMinSize(fyne.NewSize(300, 0)) // Минимальная ширина для панели
+
+	// Нижняя панель: статус, прогресс, timeline (для видео)
+	bottomPanel := container.NewVBox(
 		status,
-		fpsLabel,
-		cameraBox,
-		settingsBox,
-		materialsBox,
-		materialForm,
-		objectsBox,
-		objectForm,
+		renderProgressBar,
+		renderTimeLabel,
+		// Timeline будет добавлен позже для видео
+		widget.NewLabel("Timeline (coming soon)"),
 	)
 
-	// Версия с вертикальным скроллом панели контролов (как раньше),
-	// чтобы при большом числе объектов/настроек всё оставалось доступным.
-	content := container.NewHSplit(
-		container.NewVScroll(controls),
-		container.NewMax(imgCanvas),
+	// Основная структура: левая панель | центральный viewport | правая панель
+	// Используем Border для создания трехколоночного layout
+	centerWithRight := container.NewHSplit(
+		container.NewMax(pickableCanvas), // Центральный viewport с поддержкой кликов
+		rightPanel,
 	)
-	// слегка увеличиваем ширину левой панели, чтобы зона со списком объектов была комфортнее.
-	content.SetOffset(0.4)
+	centerWithRight.SetOffset(0.70) // Правая панель занимает 30% (увеличено для удобства)
+
+	mainContent := container.NewHSplit(
+		leftPanel,
+		centerWithRight,
+	)
+	mainContent.SetOffset(0.2) // Левая панель занимает 20%
+
+	// Вертикальный split: основной контент | нижняя панель
+	content := container.NewVSplit(
+		mainContent,
+		bottomPanel,
+	)
+	content.SetOffset(0.9) // Нижняя панель занимает 10%
 
 	w.SetContent(content)
 	// Стартовый размер окна фиксированный, а не зависит напрямую от разрешения рендера.
@@ -1300,129 +1717,239 @@ func Run(scenePath, mode string) error {
 	// Автоматический предпросмотр при старте, чтобы сразу было видно картинку.
 	go startRender(false)
 
-	// Глобальное управление камерой по WASDQE/стрелкам в режиме предпросмотра.
-	step := 0.5
-	rotStep := 0.05 // радианы для поворота камеры
+	// Плавное управление камерой по WASDQE/стрелкам в режиме предпросмотра (как в креативе майнкрафта)
+	// Состояние нажатых клавиш (защищено мьютексом для конкурентного доступа)
+	var keysMutex sync.RWMutex
+	keysPressed := make(map[fyne.KeyName]bool)
+	keysLastPressed := make(map[fyne.KeyName]time.Time) // Время последнего нажатия
+	cameraMoveSpeed := 2.0                              // единиц в секунду
+	cameraRotSpeed := 2.0                               // радиан в секунду
+	keyTimeout := 50 * time.Millisecond                 // Если клавиша не была нажата в течение этого времени, считаем её отпущенной
+
+	// Обработка нажатия клавиш
 	w.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
 		if !camControlActive {
 			return
 		}
-		changed := false
-		rotated := false
-		switch ev.Name {
-		case fyne.KeyW:
-			cam.Position.Z -= step
-			cam.Target.Z -= step
-			changed = true
-		case fyne.KeyS:
-			cam.Position.Z += step
-			cam.Target.Z += step
-			changed = true
-		case fyne.KeyA:
-			cam.Position.X -= step
-			cam.Target.X -= step
-			changed = true
-		case fyne.KeyD:
-			cam.Position.X += step
-			cam.Target.X += step
-			changed = true
-		case fyne.KeyQ:
-			cam.Position.Y -= step
-			cam.Target.Y -= step
-			changed = true
-		case fyne.KeyE:
-			cam.Position.Y += step
-			cam.Target.Y += step
-			changed = true
-		case fyne.KeyLeft:
-			// поворот вокруг оси Y (yaw - влево)
-			dirX := cam.Target.X - cam.Position.X
-			dirY := cam.Target.Y - cam.Position.Y
-			dirZ := cam.Target.Z - cam.Position.Z
-			yaw := math.Atan2(dirZ, dirX)
-			pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
-			yaw -= rotStep
-			r := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
-			newDirX := r * math.Cos(pitch) * math.Cos(yaw)
-			newDirY := r * math.Sin(pitch)
-			newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
-			cam.Target.X = cam.Position.X + newDirX
-			cam.Target.Y = cam.Position.Y + newDirY
-			cam.Target.Z = cam.Position.Z + newDirZ
-			rotated = true
-		case fyne.KeyRight:
-			// поворот вокруг оси Y (yaw - вправо)
-			dirX := cam.Target.X - cam.Position.X
-			dirY := cam.Target.Y - cam.Position.Y
-			dirZ := cam.Target.Z - cam.Position.Z
-			yaw := math.Atan2(dirZ, dirX)
-			pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
-			yaw += rotStep
-			r := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
-			newDirX := r * math.Cos(pitch) * math.Cos(yaw)
-			newDirY := r * math.Sin(pitch)
-			newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
-			cam.Target.X = cam.Position.X + newDirX
-			cam.Target.Y = cam.Position.Y + newDirY
-			cam.Target.Z = cam.Position.Z + newDirZ
-			rotated = true
-		case fyne.KeyUp:
-			// наклон камеры вверх (pitch)
-			dirX := cam.Target.X - cam.Position.X
-			dirY := cam.Target.Y - cam.Position.Y
-			dirZ := cam.Target.Z - cam.Position.Z
-			yaw := math.Atan2(dirZ, dirX)
-			pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
-			pitch += rotStep
-			if pitch > math.Pi/2-0.1 {
-				pitch = math.Pi/2 - 0.1
-			}
-			r := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
-			newDirX := r * math.Cos(pitch) * math.Cos(yaw)
-			newDirY := r * math.Sin(pitch)
-			newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
-			cam.Target.X = cam.Position.X + newDirX
-			cam.Target.Y = cam.Position.Y + newDirY
-			cam.Target.Z = cam.Position.Z + newDirZ
-			rotated = true
-		case fyne.KeyDown:
-			// наклон камеры вниз (pitch)
-			dirX := cam.Target.X - cam.Position.X
-			dirY := cam.Target.Y - cam.Position.Y
-			dirZ := cam.Target.Z - cam.Position.Z
-			yaw := math.Atan2(dirZ, dirX)
-			pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
-			pitch -= rotStep
-			if pitch < -math.Pi/2+0.1 {
-				pitch = -math.Pi/2 + 0.1
-			}
-			r := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
-			newDirX := r * math.Cos(pitch) * math.Cos(yaw)
-			newDirY := r * math.Sin(pitch)
-			newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
-			cam.Target.X = cam.Position.X + newDirX
-			cam.Target.Y = cam.Position.Y + newDirY
-			cam.Target.Z = cam.Position.Z + newDirZ
-			rotated = true
-		}
-		if !changed && !rotated {
-			return
-		}
-		// обновляем камеру и поля UI
-		sc.Camera = cam
-		camPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
-		camPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
-		camPosZ.SetText(fmt.Sprintf("%.2f", cam.Position.Z))
-		camLookX.SetText(fmt.Sprintf("%.2f", cam.Target.X))
-		camLookY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
-		camLookZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
-		if rotated {
-			status.SetText("Camera rotated (arrows)")
-		} else {
-			status.SetText("Camera moved (WASDQE)")
-		}
-		go startRender(false)
+		keysMutex.Lock()
+		keysPressed[ev.Name] = true
+		keysLastPressed[ev.Name] = time.Now()
+		keysMutex.Unlock()
 	})
+
+	// Цикл плавного движения камеры (без инерции - мгновенная остановка)
+	cameraUpdateTicker := time.NewTicker(16 * time.Millisecond) // ~60 FPS для плавного движения
+	go func() {
+		defer cameraUpdateTicker.Stop()
+		for {
+			select {
+			case <-cameraUpdateTicker.C:
+				if !camControlActive {
+					continue
+				}
+
+				// Проверяем, какие клавиши всё ещё нажаты (автоматически отпускаем, если не нажаты в течение keyTimeout)
+				now := time.Now()
+				keysMutex.Lock()
+				for key, lastTime := range keysLastPressed {
+					if now.Sub(lastTime) > keyTimeout {
+						keysPressed[key] = false
+					}
+				}
+				keysMutex.Unlock()
+
+				mu.Lock()
+				anyKeyPressed := false
+				changed := false
+				rotated := false
+
+				// Вычисляем направление камеры
+				dirX := cam.Target.X - cam.Position.X
+				dirY := cam.Target.Y - cam.Position.Y
+				dirZ := cam.Target.Z - cam.Position.Z
+				dirLen := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
+				if dirLen < 1e-6 {
+					mu.Unlock()
+					continue
+				}
+
+				// Нормализуем направление
+				dirX /= dirLen
+				dirY /= dirLen
+				dirZ /= dirLen
+
+				// Вычисляем базис камеры вручную
+				upX, upY, upZ := cam.Up.X, cam.Up.Y, cam.Up.Z
+				// u = normalize(cross(up, w))
+				uX := upY*dirZ - upZ*dirY
+				uY := upZ*dirX - upX*dirZ
+				uZ := upX*dirY - upY*dirX
+				uLen := math.Sqrt(uX*uX + uY*uY + uZ*uZ)
+				if uLen > 1e-6 {
+					uX /= uLen
+					uY /= uLen
+					uZ /= uLen
+				}
+
+				// Вычисляем углы для поворота
+				yaw := math.Atan2(dirZ, dirX)
+				pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
+
+				// Движение вперед/назад (W/S)
+				dt := 16.0 / 1000.0 // 16ms в секундах
+				moveStep := cameraMoveSpeed * dt
+
+				// Читаем состояние всех клавиш под блокировкой
+				keysMutex.RLock()
+				keyW := keysPressed[fyne.KeyW]
+				keyS := keysPressed[fyne.KeyS]
+				keyA := keysPressed[fyne.KeyA]
+				keyD := keysPressed[fyne.KeyD]
+				keyQ := keysPressed[fyne.KeyQ]
+				keyE := keysPressed[fyne.KeyE]
+				keyLeft := keysPressed[fyne.KeyLeft]
+				keyRight := keysPressed[fyne.KeyRight]
+				keyUp := keysPressed[fyne.KeyUp]
+				keyDown := keysPressed[fyne.KeyDown]
+				keysMutex.RUnlock()
+
+				if keyW {
+					// Движение вперед по направлению камеры
+					cam.Position.X += dirX * moveStep
+					cam.Position.Y += dirY * moveStep
+					cam.Position.Z += dirZ * moveStep
+					cam.Target.X += dirX * moveStep
+					cam.Target.Y += dirY * moveStep
+					cam.Target.Z += dirZ * moveStep
+					changed = true
+					anyKeyPressed = true
+				}
+				if keyS {
+					// Движение назад
+					cam.Position.X -= dirX * moveStep
+					cam.Position.Y -= dirY * moveStep
+					cam.Position.Z -= dirZ * moveStep
+					cam.Target.X -= dirX * moveStep
+					cam.Target.Y -= dirY * moveStep
+					cam.Target.Z -= dirZ * moveStep
+					changed = true
+					anyKeyPressed = true
+				}
+
+				// Движение влево/вправо (A/D)
+				if keyA {
+					// Движение влево (перпендикулярно направлению)
+					cam.Position.X -= uX * moveStep
+					cam.Position.Y -= uY * moveStep
+					cam.Position.Z -= uZ * moveStep
+					cam.Target.X -= uX * moveStep
+					cam.Target.Y -= uY * moveStep
+					cam.Target.Z -= uZ * moveStep
+					changed = true
+					anyKeyPressed = true
+				}
+				if keyD {
+					// Движение вправо
+					cam.Position.X += uX * moveStep
+					cam.Position.Y += uY * moveStep
+					cam.Position.Z += uZ * moveStep
+					cam.Target.X += uX * moveStep
+					cam.Target.Y += uY * moveStep
+					cam.Target.Z += uZ * moveStep
+					changed = true
+					anyKeyPressed = true
+				}
+
+				// Движение вверх/вниз (Q/E)
+				if keyQ {
+					// Движение вниз
+					cam.Position.Y -= moveStep
+					cam.Target.Y -= moveStep
+					changed = true
+					anyKeyPressed = true
+				}
+				if keyE {
+					// Движение вверх
+					cam.Position.Y += moveStep
+					cam.Target.Y += moveStep
+					changed = true
+					anyKeyPressed = true
+				}
+
+				// Поворот камеры (стрелки)
+				rotStep := cameraRotSpeed * dt
+				if keyLeft {
+					yaw -= rotStep
+					rotated = true
+					anyKeyPressed = true
+				}
+				if keyRight {
+					yaw += rotStep
+					rotated = true
+					anyKeyPressed = true
+				}
+				if keyUp {
+					pitch -= rotStep // Инвертировано: Up = вверх = уменьшаем pitch
+					if pitch < -math.Pi/2+0.1 {
+						pitch = -math.Pi/2 + 0.1
+					}
+					rotated = true
+					anyKeyPressed = true
+				}
+				if keyDown {
+					pitch += rotStep // Инвертировано: Down = вниз = увеличиваем pitch
+					if pitch > math.Pi/2-0.1 {
+						pitch = math.Pi/2 - 0.1
+					}
+					rotated = true
+					anyKeyPressed = true
+				}
+
+				// Применяем поворот камеры
+				if rotated {
+					r := dirLen
+					newDirX := r * math.Cos(pitch) * math.Cos(yaw)
+					newDirY := r * math.Sin(pitch)
+					newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
+					cam.Target.X = cam.Position.X + newDirX
+					cam.Target.Y = cam.Position.Y + newDirY
+					cam.Target.Z = cam.Position.Z + newDirZ
+				}
+
+				mu.Unlock()
+
+				// Обновляем камеру и UI только если что-то изменилось
+				if anyKeyPressed && (changed || rotated) {
+					mu.Lock()
+					sc.Camera = cam
+					camPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
+					camPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
+					camPosZ.SetText(fmt.Sprintf("%.2f", cam.Position.Z))
+					camLookX.SetText(fmt.Sprintf("%.2f", cam.Target.X))
+					camLookY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
+					camLookZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
+					mu.Unlock()
+
+					// Запускаем рендер с debounce только один раз после движения
+					// startRender уже имеет debounce, поэтому не нужно вызывать его каждый кадр
+					// Вызываем только если это не wireframe режим (wireframe стримит сам)
+					mu.Lock()
+					isWireframe := false
+					if engine.GetBackend() == engine.BackendGPU {
+						isWireframe = (gpu.GetRenderMode() == 1)
+					} else {
+						isWireframe = (engine.GetCPURenderMode() == 1)
+					}
+					mu.Unlock()
+
+					// Для normal режима запускаем рендер с debounce
+					if !isWireframe {
+						startRender(false)
+					}
+				}
+			}
+		}
+	}()
 
 	w.ShowAndRun()
 	return nil

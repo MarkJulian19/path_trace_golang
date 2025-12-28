@@ -128,6 +128,18 @@ var (
 	smoothOverride bool
 )
 
+// Режим рендеринга: 0 = normal, 1 = wireframe
+var (
+	renderMode      int = 0
+	renderModeMutex sync.RWMutex
+)
+
+// Выбранный объект для подсветки
+var (
+	selectedObject      int = -1
+	selectedObjectMutex sync.RWMutex
+)
+
 // getSmoothConfig читает настройки сглаживания из переменных окружения один раз.
 // PATHTRACER_GPU_SMOOTH: "0"/"false"/"off" — выкл, "1"/"true"/"on" — вкл (по умолчанию: выкл).
 // PATHTRACER_GPU_SMOOTH_RADIUS: целое 1..5 (по умолчанию 2).
@@ -201,23 +213,62 @@ func SetSmoothConfigFromUI(enabled bool, radius int, strength float64) {
 	smoothOverride = true
 }
 
+// SetRenderModeFromUI устанавливает режим рендеринга из UI.
+// mode: 0 = normal, 1 = wireframe
+func SetRenderModeFromUI(mode int) {
+	renderModeMutex.Lock()
+	defer renderModeMutex.Unlock()
+	if mode < 0 {
+		mode = 0
+	}
+	if mode > 1 {
+		mode = 1
+	}
+	renderMode = mode
+}
+
+// GetRenderMode возвращает текущий режим рендеринга.
+func GetRenderMode() int {
+	renderModeMutex.RLock()
+	defer renderModeMutex.RUnlock()
+	return renderMode
+}
+
+// SetSelectedObjectFromUI устанавливает выбранный объект для подсветки из UI.
+// objIndex: индекс объекта (-1 = нет выбора)
+func SetSelectedObjectFromUI(objIndex int) {
+	selectedObjectMutex.Lock()
+	defer selectedObjectMutex.Unlock()
+	selectedObject = objIndex
+}
+
+// GetSelectedObject возвращает индекс выбранного объекта.
+func GetSelectedObject() int {
+	selectedObjectMutex.RLock()
+	defer selectedObjectMutex.RUnlock()
+	return selectedObject
+}
+
 // gpuRenderer owns a hidden GLFW window and GL resources used for compute rendering.
 type gpuRenderer struct {
-	initOnce   sync.Once
-	initErr    error
-	window     *glfw.Window
-	program    uint32
-	imgTexture uint32
-	pbo        uint32
-	matSSBO    uint32
-	objSSBO    uint32
-	lightSSBO  uint32 // SSBO для списка индексов эмиссивных объектов
-	accumSSBO  uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
-	camUBO     uint32
-	skyUBO     uint32
-	fogUBO     uint32
-	width      int
-	height     int
+	initOnce         sync.Once
+	initErr          error
+	window           *glfw.Window
+	program          uint32
+	wireframeProgram uint32 // Отдельный шейдер для wireframe режима
+	imgTexture       uint32
+	pbo              uint32
+	pboBack          uint32 // Второй PBO для асинхронного чтения (двойная буферизация)
+	pboIndex         int    // Индекс текущего PBO (0 или 1)
+	matSSBO          uint32
+	objSSBO          uint32
+	lightSSBO        uint32 // SSBO для списка индексов эмиссивных объектов
+	accumSSBO        uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
+	camUBO           uint32
+	skyUBO           uint32
+	fogUBO           uint32
+	width            int
+	height           int
 	// accum содержит накопленные значения цвета в диапазоне [0,1] для каждого пикселя (R,G,B).
 	// Используется только для чтения финального результата, накопление происходит на GPU.
 	accum []float32
@@ -252,7 +303,7 @@ type renderRequest struct {
 	sc       *scene.Scene
 	cfg      RenderConfig
 	img      *image.RGBA
-	progress func()
+	progress func(currentSample, totalSamples int)
 	done     chan error
 }
 
@@ -331,6 +382,8 @@ func (r *gpuRenderer) initGL() error {
 		gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
 
 		gl.GenBuffers(1, &r.pbo)
+		gl.GenBuffers(1, &r.pboBack)
+		r.pboIndex = 0
 		gl.GenBuffers(1, &r.matSSBO)
 		gl.GenBuffers(1, &r.objSSBO)
 		gl.GenBuffers(1, &r.lightSSBO)
@@ -355,6 +408,7 @@ uniform int uSamplesPerPx;
 uniform int uMaxDepth;
 uniform uint uFrameSeed;
 uniform int uSampleCount; // Текущее количество накопленных сэмплов
+uniform int uSelectedObject; // Индекс выбранного объекта (-1 = нет выбора)
 
 // Камера (совпадает с scene.Camera)
 layout(std140, binding = 1) uniform CameraBlock {
@@ -439,6 +493,9 @@ const int OBJ_BOX       = 2;
 const int MAT_STRIDE    = 20;
 const int OBJ_STRIDE    = 12;
 const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+const float INV_PI = 0.31830988618;
+const float INV_TWO_PI = 0.15915494309;
 
 // Быстрый хэш-рандом по пикселю и сэмплу
 uint hash_u(uint x) {
@@ -518,25 +575,28 @@ void readObject(int idx, out int typ, out int matIndex, out vec3 pos, out vec3 s
     size = vec3(objData[base + 8], objData[base + 9], objData[base + 10]);
 }
 
-// Пересечения
+// Пересечения - оптимизировано: кэширование деления
 bool hitSphere(vec3 center, float radius, Ray r, float tMin, float tMax, inout Hit h) {
     vec3 oc = r.orig - center;
     float a = dot(r.dir, r.dir);
     float halfB = dot(oc, r.dir);
-    float c = dot(oc, oc) - radius * radius;
+    float radius2 = radius * radius; // Кэшируем radius^2
+    float c = dot(oc, oc) - radius2;
     float disc = halfB * halfB - a * c;
     // Проверка на численную стабильность: касательный луч или численная погрешность
     if (disc < 1e-8) return false;
     float sqrtD = sqrt(disc);
+    float invA = 1.0 / a; // Кэшируем деление
 
-    float root = (-halfB - sqrtD) / a;
+    float root = (-halfB - sqrtD) * invA;
     if (root < tMin || root > tMax) {
-        root = (-halfB + sqrtD) / a;
+        root = (-halfB + sqrtD) * invA;
         if (root < tMin || root > tMax) return false;
     }
     h.t = root;
     h.p = rayAt(r, root);
-    vec3 outward = (h.p - center) / radius;
+    float invRadius = 1.0 / radius; // Кэшируем деление
+    vec3 outward = (h.p - center) * invRadius;
     setFaceNormal(r, h, outward);
     return true;
 }
@@ -739,12 +799,27 @@ bool hitWorld(Ray r, float tMin, float tMax, out Hit outHit) {
     return hitAnything;
 }
 
-// Случайные направления
+// Случайные направления - оптимизировано: меньше вызовов rng
 vec3 randomInUnitSphere(inout uint state) {
-    for (int i = 0; i < 16; i++) {
-        vec3 p = 2.0 * vec3(rng(state), rng(state), rng(state)) - vec3(1.0);
-        if (dot(p, p) >= 1.0) continue;
-        return p;
+    for (int i = 0; i < 8; i++) {
+        // Оптимизация: используем один хэш с разными смещениями вместо 3 вызовов rng
+        uint s1 = hash_u(state);
+        uint s2 = hash_u(state ^ 0x12345678u);
+        uint s3 = hash_u(state ^ 0x87654321u);
+        state = s1; // Обновляем состояние
+        
+        vec3 p = vec3(
+            float(s1 & 0xFFFFu) / 32767.5 - 1.0,
+            float(s2 & 0xFFFFu) / 32767.5 - 1.0,
+            float(s3 & 0xFFFFu) / 32767.5 - 1.0
+        );
+        
+        float len2 = dot(p, p);
+        if (len2 > 1.0) {
+            // Быстрая нормализация через inversesqrt
+            p *= inversesqrt(len2);
+        }
+        if (len2 <= 1.0) return p;
     }
     return vec3(0, 0, 1);
 }
@@ -752,13 +827,18 @@ vec3 randomInUnitSphere(inout uint state) {
 vec3 randomCosineDirection(vec3 normal, inout uint state) {
     float r1 = rng(state);
     float r2 = rng(state);
-    float phi = 6.28318530718 * r1; // 2.0 * PI (оптимизация: вычисляем константу один раз)
+    float phi = TWO_PI * r1; // Используем константу
     float cosTheta = sqrt(r2);
     float sinTheta = sqrt(1.0 - r2);
     // Оптимизация: кэшируем проверку
     bool useY = abs(normal.x) > 0.9;
-    vec3 u = normalize(useY ? vec3(0, 1, 0) : vec3(1, 0, 0));
-    vec3 v = normalize(cross(normal, u));
+    vec3 uBase = useY ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    // Оптимизация: uBase уже нормализован (единичный вектор)
+    vec3 u = uBase;
+    vec3 vBase = cross(normal, u);
+    // Оптимизация: быстрая нормализация через inversesqrt
+    float vLen2 = dot(vBase, vBase);
+    vec3 v = vBase * inversesqrt(vLen2);
     // Оптимизация: нормаль уже нормализована, не нужно нормализовать w
     vec3 w = normal;
     // Оптимизация: вычисляем sin/cos один раз
@@ -769,8 +849,9 @@ vec3 randomCosineDirection(vec3 normal, inout uint state) {
         sinTheta * sinPhi,
         cosTheta
     );
-    // Оптимизация: localDir уже нормализован (cos^2 + sin^2 = 1), но проверим для безопасности
-    return normalize(localDir.x * u + localDir.y * v + localDir.z * w);
+    // Оптимизация: localDir уже нормализован математически (cos^2 + sin^2 = 1)
+    // Убираем лишний normalize() - вектор уже нормализован
+    return localDir.x * u + localDir.y * v + localDir.z * w;
 }
 
 // GGX/Trowbridge-Reitz importance sampling для металлических материалов
@@ -786,12 +867,15 @@ vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
     // GGX importance sampling для нормалей микроповерхности
     float cosTheta = sqrt((1.0 - r2) / (1.0 + (alpha2 - 1.0) * r2));
     float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-    float phi = 2.0 * PI * r1;
+    float phi = TWO_PI * r1; // Используем константу
     
     // Локальная система координат
     vec3 tangent, bitangent;
     vec3 up = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
-    tangent = normalize(cross(up, normal));
+    vec3 tangentBase = cross(up, normal);
+    // Оптимизация: быстрая нормализация через inversesqrt
+    float tangentLen2 = dot(tangentBase, tangentBase);
+    tangent = tangentBase * inversesqrt(tangentLen2);
     bitangent = cross(normal, tangent);
     
     // Нормаль микроповерхности в локальной системе
@@ -802,11 +886,12 @@ vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
     );
     
     // Преобразуем в мировую систему координат
-    vec3 halfVec = normalize(
-        halfVecLocal.x * tangent +
-        halfVecLocal.y * bitangent +
-        halfVecLocal.z * normal
-    );
+    vec3 halfVec = halfVecLocal.x * tangent +
+                    halfVecLocal.y * bitangent +
+                    halfVecLocal.z * normal;
+    // Оптимизация: быстрая нормализация через inversesqrt
+    float halfVecLen2 = dot(halfVec, halfVec);
+    halfVec *= inversesqrt(halfVecLen2);
     
     // Вычисляем направление отражения
     vec3 reflectDir = reflect(-viewDir, halfVec);
@@ -817,7 +902,9 @@ vec3 sampleGGX(vec3 viewDir, vec3 normal, float roughness, inout uint state) {
         reflectDir = reflect(-viewDir, normal);
     }
     
-    return normalize(reflectDir);
+    // Оптимизация: быстрая нормализация через inversesqrt
+    float reflectDirLen2 = dot(reflectDir, reflectDir);
+    return reflectDir * inversesqrt(reflectDirLen2);
 }
 
 // Оптимизированная функция отражения
@@ -866,9 +953,9 @@ float reflectance(float cosine, float relIOR) {
     return r0 + (1.0 - r0) * x5;
 }
 
-// Простейший диффузный BRDF (Lambertian)
+// Простейший диффузный BRDF (Lambertian) - оптимизировано: умножение вместо деления
 vec3 brdfLambert(vec3 albedo) {
-	return albedo / PI;
+	return albedo * INV_PI;
 }
 
 // Получение количества источников света (оптимизированная версия)
@@ -904,10 +991,12 @@ bool sampleLightGeometry(
 		float u2 = rng(state);
 		float z = 1.0 - 2.0 * u1;
 		float r = sqrt(max(0.0, 1.0 - z * z));
-		float phi = 2.0 * PI * u2;
+		float phi = TWO_PI * u2; // Используем константу
 		vec3 local = vec3(r * cos(phi), r * sin(phi), z);
 
-		lightNormal = normalize(local);
+		// Оптимизация: быстрая нормализация через inversesqrt
+		float localLen2 = dot(local, local);
+		lightNormal = local * inversesqrt(localLen2);
 		lightPos = pos + radius * lightNormal;
 		float area = 4.0 * PI * radius * radius;
 		pdfArea = 1.0 / area;
@@ -1071,7 +1160,9 @@ vec3 estimateDirectLight(
 
 // Фон / небо
 vec3 backgroundColor(Ray r) {
-    vec3 dir = normalize(r.dir);
+    // Оптимизация: быстрая нормализация через inversesqrt
+    float dirLen2 = dot(r.dir, r.dir);
+    vec3 dir = r.dir * inversesqrt(dirLen2);
     int st = int(round(skyType));
     if (st == 2) {
         // gradient
@@ -1099,8 +1190,13 @@ void buildCamera(vec2 uv, inout Ray r, inout uint state) {
     vec3 target = camTarget.xyz;
     vec3 up = camUp.xyz;
 
-    vec3 w = normalize(origin - target);
-    vec3 u = normalize(cross(up, w));
+    // Оптимизация: быстрая нормализация через inversesqrt
+    vec3 wBase = origin - target;
+    float wLen2 = dot(wBase, wBase);
+    vec3 w = wBase * inversesqrt(wLen2);
+    vec3 uBase = cross(up, w);
+    float uLen2 = dot(uBase, uBase);
+    vec3 u = uBase * inversesqrt(uLen2);
     vec3 v = cross(w, u);
 
     float focusDist = camFocusDist != 0.0 ? camFocusDist : length(origin - target);
@@ -1114,11 +1210,15 @@ void buildCamera(vec2 uv, inout Ray r, inout uint state) {
         vec3 offset = u * rd.x + v * rd.y;
         vec3 dir = lowerLeftCorner + uv.x * horizontal + uv.y * vertical - origin - offset;
         r.orig = origin + offset;
-        r.dir = normalize(dir);
+        // Оптимизация: быстрая нормализация через inversesqrt
+        float dirLen2 = dot(dir, dir);
+        r.dir = dir * inversesqrt(dirLen2);
     } else {
         vec3 dir = lowerLeftCorner + uv.x * horizontal + uv.y * vertical - origin;
         r.orig = origin;
-        r.dir = normalize(dir);
+        // Оптимизация: быстрая нормализация через inversesqrt
+        float dirLen2 = dot(dir, dir);
+        r.dir = dir * inversesqrt(dirLen2);
     }
 }
 
@@ -1139,7 +1239,9 @@ vec3 applyFog(vec3 radiance, float distance) {
 float phaseHG(float cosTheta, float g) {
     float gg = g * g;
     float denom = 1.0 + gg - 2.0 * g * cosTheta;
-    return (1.0 - gg) / (4.0 * PI * denom * sqrt(max(denom, 1e-6)));
+    float denomSqrt = sqrt(max(denom, 1e-6));
+    // Оптимизация: используем INV_PI вместо деления на PI
+    return (1.0 - gg) * INV_PI * 0.25 / (denom * denomSqrt);
 }
 
 // Простейший трёхмерный hash‑шум.
@@ -1152,13 +1254,28 @@ float hash31(vec3 p) {
     return fract(sin(q.x + q.y + q.z) * 43758.5453);
 }
 
-// Фрактальный 3D‑шум для неоднородного тумана.
+// Фрактальный 3D‑шум для неоднородного тумана - оптимизировано: упрощение для малого количества октав
 float volumeNoise(vec3 p) {
+    float octaves = clamp(fogNoiseOctaves, 1.0, 5.0);
+    int oct = int(octaves);
+    
+    // Оптимизация: быстрая версия для 1-2 октав
+    if (oct <= 1) {
+        return hash31(p * fogNoiseScale);
+    }
+    
+    // Оптимизация: быстрая версия для 2 октав
+    if (oct == 2) {
+        float n1 = hash31(p * fogNoiseScale);
+        float n2 = hash31(p * fogNoiseScale * 2.0);
+        return mix(n1, n2, 0.5);
+    }
+    
+    // Полная версия для 3+ октав
     float amp = 1.0;
     float freq = fogNoiseScale;
     float sum = 0.0;
     float norm = 0.0;
-    int oct = int(clamp(fogNoiseOctaves, 1.0, 5.0));
     for (int i = 0; i < 5; i++) {
         if (i >= oct) break;
         sum += hash31(p * freq) * amp;
@@ -1404,16 +1521,25 @@ vec3 rayColor(Ray r, inout uint state) {
             firstSegment = false;
             firstHitT = h.t;
         }
-
-        // Оптимизация: проверяем тип материала один раз
-        if (typ == MAT_EMISSIVE) {
+        
+        // Оптимизация: проверяем тип материала один раз, ранний выход для эмиссивных
+        bool isEmissive = (typ == MAT_EMISSIVE);
+        bool isDielectric = (typ == MAT_DIELECTRIC);
+        bool isMetal = (typ == MAT_METAL || typ == MAT_MIRROR);
+        
+        if (isEmissive) {
             radiance += throughput * emit;
+            // Ранний выход для эмиссивных материалов - прекращаем трассировку
+            break;
         }
 
         // Случайные рассеяния по типу материала
         vec3 newDir;
         vec3 attenuation = albedo;
         bool scattered = true;
+        
+        // Оптимизация: предвычисление часто используемых величин
+        vec3 viewDir = normalize(r.dir);
 
         // Диффузные материалы
         if (typ == MAT_LAMBERT) {
@@ -1424,9 +1550,8 @@ vec3 rayColor(Ray r, inout uint state) {
             vec3 direct = estimateDirectLight(r, h, albedo, state);
             radiance += throughput * direct;
             
-        } else if (typ == MAT_METAL || typ == MAT_MIRROR) {
-            // Оптимизация: кэшируем нормализованное направление
-            vec3 viewDir = normalize(r.dir);
+        } else if (isMetal) {
+            // Оптимизация: используем уже вычисленный viewDir
             float metalRough = (smoothness > 0.0) ? (1.0 - smoothness) : rough;
             
             // Используем reflectivity для металлов
@@ -1458,7 +1583,9 @@ vec3 rayColor(Ray r, inout uint state) {
                 // но проверим длину для безопасности
                 float lenSq = dot(newDir, newDir);
                 if (abs(lenSq - 1.0) > 1e-4) {
-                    newDir = normalize(newDir);
+                    // Оптимизация: быстрая нормализация через inversesqrt
+            float newDirLen2 = dot(newDir, newDir);
+            newDir = newDir * inversesqrt(newDirLen2);
                 }
                 attenuation = albedo * effectiveReflectivity;
             }
@@ -1495,10 +1622,10 @@ vec3 rayColor(Ray r, inout uint state) {
                 }
             }
             
-        } else if (typ == MAT_DIELECTRIC) {
+        } else if (isDielectric) {
             attenuation = vec3(1.0);
-            // Оптимизация: кэшируем нормализованное направление
-            vec3 unitDir = normalize(r.dir);
+            // Оптимизация: используем уже вычисленный viewDir
+            vec3 unitDir = viewDir;
             float cosTheta = min(dot(-unitDir, h.normal), 1.0);
             // Оптимизация: используем более быстрый способ вычисления sinTheta
             // sin^2 = 1 - cos^2, но для малых углов можно использовать приближение
@@ -1639,7 +1766,9 @@ vec3 rayColor(Ray r, inout uint state) {
                     }
                 }
             }
-            newDir = normalize(newDir);
+            // Оптимизация: быстрая нормализация через inversesqrt
+            float newDirLen2 = dot(newDir, newDir);
+            newDir = newDir * inversesqrt(newDirLen2);
             
         } else {
             scattered = false;
@@ -1770,6 +1899,401 @@ void main() {
 			r.initErr = fmt.Errorf("link compute program: %s", string(log))
 			return
 		}
+
+		// Создаем отдельный wireframe шейдер
+		const wireframeShader = `
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba16f) uniform writeonly image2D destTex;
+
+uniform int uWidth;
+uniform int uHeight;
+uniform int uSamplesPerPx;
+uniform int uMaxDepth;
+uniform uint uFrameSeed;
+uniform int uSampleCount;
+uniform int uSelectedObject; // Индекс выбранного объекта (-1 = нет выбора)
+
+layout(std140, binding = 1) uniform CameraBlock {
+    vec4 camPos;
+    vec4 camTarget;
+    vec4 camUp;
+    float camFov;
+    float camAperture;
+    float camFocusDist;
+    float camAspect;
+};
+
+layout(std430, binding = 3) readonly buffer MaterialBuffer {
+    float matData[];
+};
+
+layout(std430, binding = 4) readonly buffer ObjectBuffer {
+    float objData[];
+};
+
+layout(std430, binding = 7) buffer AccumBuffer {
+    float accumData[];
+};
+
+struct Ray {
+    vec3 orig;
+    vec3 dir;
+};
+
+struct Hit {
+    vec3 p;
+    vec3 normal;
+    float t;
+    int matIndex;
+    int objIndex;
+    bool frontFace;
+};
+
+uint hash_u(uint x) {
+    x ^= x >> 16;
+    x *= 0x85ebca6bU;
+    x ^= x >> 13;
+    x *= 0xc2b2ae35U;
+    x ^= x >> 16;
+    return x;
+}
+
+float rng(inout uint state) {
+    state = hash_u(state);
+    return float(state) / 4294967296.0;
+}
+
+void setFaceNormal(Ray r, inout Hit h, vec3 outwardNormal) {
+    h.frontFace = dot(r.dir, outwardNormal) < 0.0;
+    h.normal = h.frontFace ? outwardNormal : -outwardNormal;
+}
+
+const int OBJ_SPHERE = 0;
+const int OBJ_PLANE = 1;
+const int OBJ_BOX = 2;
+
+const int MAT_LAMBERT = 0;
+const int MAT_METAL = 1;
+const int MAT_DIELECTRIC = 2;
+const int MAT_EMISSIVE = 3;
+const int MAT_MIRROR = 4;
+
+const int OBJ_STRIDE = 12; // Должно совпадать с основным шейдером!
+
+void readObject(int idx, out int typ, out int matIdx, out vec3 pos, out vec3 size) {
+    int base = idx * OBJ_STRIDE;
+    float ftyp = objData[base + 0];
+    float fmat = objData[base + 1];
+    typ = int(ftyp + 0.5);
+    matIdx = int(fmat + 0.5);
+    pos = vec3(objData[base + 4], objData[base + 5], objData[base + 6]);
+    size = vec3(objData[base + 8], objData[base + 9], objData[base + 10]);
+}
+
+// Читаем количество объектов из буфера
+int getObjectCount() {
+    return int(objData.length()) / OBJ_STRIDE;
+}
+
+bool hitSphere(vec3 center, float radius, Ray r, float tMin, float tMax, inout Hit rec) {
+    vec3 oc = r.orig - center;
+    float a = dot(r.dir, r.dir);
+    float halfB = dot(oc, r.dir);
+    float c = dot(oc, oc) - radius * radius;
+    float discriminant = halfB * halfB - a * c;
+    
+    if (discriminant < 0.0) return false;
+    float sqrtD = sqrt(discriminant);
+    float root = (-halfB - sqrtD) / a;
+    if (root < tMin || root > tMax) {
+        root = (-halfB + sqrtD) / a;
+        if (root < tMin || root > tMax) return false;
+    }
+    
+    rec.t = root;
+    rec.p = r.orig + root * r.dir;
+    vec3 outwardNormal = (rec.p - center) / radius;
+    setFaceNormal(r, rec, outwardNormal);
+    return true;
+}
+
+bool hitPlane(vec3 point, vec3 normal, Ray r, float tMin, float tMax, inout Hit rec) {
+    float denom = dot(normal, r.dir);
+    if (abs(denom) < 1e-6) return false;
+    float t = dot(point - r.orig, normal) / denom;
+    if (t < tMin || t > tMax) return false;
+    rec.t = t;
+    rec.p = r.orig + t * r.dir;
+    setFaceNormal(r, rec, normal);
+    return true;
+}
+
+bool hitBox(vec3 bmin, vec3 bmax, Ray r, float tMin, float tMax, inout Hit rec) {
+    vec3 invDir = 1.0 / r.dir;
+    vec3 t0 = (bmin - r.orig) * invDir;
+    vec3 t1 = (bmax - r.orig) * invDir;
+    vec3 tMinVec = min(t0, t1);
+    vec3 tMaxVec = max(t0, t1);
+    float tNear = max(max(tMinVec.x, tMinVec.y), tMinVec.z);
+    float tFar = min(min(tMaxVec.x, tMaxVec.y), tMaxVec.z);
+    
+    if (tFar < 0.0 || tNear > tFar) return false;
+    float t = tNear;
+    if (t < tMin) {
+        t = tFar;
+        if (t < tMin || t > tMax) return false;
+    }
+    if (t > tMax) return false;
+    
+    rec.t = t;
+    rec.p = r.orig + t * r.dir;
+    
+    // УЛУЧШЕННОЕ вычисление нормали для четких граней (Minecraft-стиль)
+    // Определяем, какая грань была пересечена первой
+    vec3 center = (bmin + bmax) * 0.5;
+    vec3 halfSize = (bmax - bmin) * 0.5;
+    vec3 localP = rec.p - center;
+    
+    // Вычисляем расстояния до каждой грани
+    vec3 distToFace = halfSize - abs(localP);
+    
+    // Находим ближайшую грань (минимальное расстояние)
+    float minDist = min(distToFace.x, min(distToFace.y, distToFace.z));
+    
+    // Определяем нормаль по ближайшей грани
+    vec3 normal = vec3(0.0);
+    const float epsilon = 1e-5;
+    
+    if (abs(distToFace.x - minDist) < epsilon) {
+        // Грань по X
+        normal = vec3(sign(localP.x), 0.0, 0.0);
+    } else if (abs(distToFace.y - minDist) < epsilon) {
+        // Грань по Y
+        normal = vec3(0.0, sign(localP.y), 0.0);
+    } else {
+        // Грань по Z
+        normal = vec3(0.0, 0.0, sign(localP.z));
+    }
+    
+    setFaceNormal(r, rec, normal);
+    return true;
+}
+
+// УДАЛЕНО: функции hitWorld и isInShadow больше не нужны для wireframe режима
+// Они были слишком медленными и вызывали проблемы с производительностью
+
+void buildCamera(vec2 uv, inout Ray r, inout uint state) {
+    float aspect = camAspect != 0.0 ? camAspect : (float(uWidth) / float(uHeight));
+    float theta = camFov * 3.14159265359 / 180.0;
+    float h = tan(theta * 0.5);
+    float viewportHeight = 2.0 * h;
+    float viewportWidth = aspect * viewportHeight;
+    
+    vec3 origin = camPos.xyz;
+    vec3 target = camTarget.xyz;
+    vec3 up = camUp.xyz;
+    
+    vec3 wBase = origin - target;
+    float wLen2 = dot(wBase, wBase);
+    vec3 w = wBase * inversesqrt(wLen2);
+    vec3 uBase = cross(up, w);
+    float uLen2 = dot(uBase, uBase);
+    vec3 u = uBase * inversesqrt(uLen2);
+    vec3 v = cross(w, u);
+    
+    float focusDist = camFocusDist != 0.0 ? camFocusDist : length(origin - target);
+    vec3 horizontal = viewportWidth * focusDist * u;
+    vec3 vertical = viewportHeight * focusDist * v;
+    vec3 lowerLeftCorner = origin - 0.5 * horizontal - 0.5 * vertical - w * focusDist;
+    
+    vec3 dir = lowerLeftCorner + uv.x * horizontal + uv.y * vertical - origin;
+    r.orig = origin;
+    float dirLen2 = dot(dir, dir);
+    r.dir = dir * inversesqrt(dirLen2);
+}
+
+// Чтение материала для wireframe режима
+void readMaterialSimple(int idx, out int typ, out vec3 albedo, out vec3 emit) {
+    int base = idx * 20; // MAT_STRIDE = 20
+    float ftyp = matData[base + 0];
+    typ = int(ftyp + 0.5);
+    albedo = vec3(matData[base + 4], matData[base + 5], matData[base + 6]);
+    emit = vec3(matData[base + 8], matData[base + 9], matData[base + 10]);
+}
+
+vec3 wireframeColor(Ray r, inout uint state) {
+    int objCount = getObjectCount();
+    if (objCount <= 0) return vec3(0.1, 0.1, 0.1);
+    
+    Hit closestHit;
+    bool hitFound = false;
+    float closest = 1e30;
+    
+    // Оптимизация: кэшируем часто используемые значения
+    vec3 rDir = r.dir;
+    vec3 rOrig = r.orig;
+    
+    // Находим ближайший объект с ранним выходом
+    for (int i = 0; i < objCount; i++) {
+        int typ, matIdx;
+        vec3 pos, size;
+        readObject(i, typ, matIdx, pos, size);
+        
+        Hit temp;
+        temp.matIndex = matIdx;
+        temp.objIndex = i;
+        bool hitObj = false;
+        
+        float tMin = 0.001;
+        float tMax = closest;
+        
+        // Оптимизация: ранний выход для объектов, которые точно не пересекаются
+        // Используем упрощенные проверки для быстрого отсечения
+        
+        if (typ == OBJ_SPHERE) {
+            hitObj = hitSphere(pos, size.x, r, tMin, tMax, temp);
+        } else if (typ == OBJ_PLANE) {
+            const vec3 planeNormal = vec3(0.0, 1.0, 0.0);
+            hitObj = hitPlane(pos, planeNormal, r, tMin, tMax, temp);
+        } else if (typ == OBJ_BOX) {
+            // Оптимизация: предвычисляем bmin/bmax один раз
+            vec3 halfSize = 0.5 * size;
+            vec3 bmin = pos - halfSize;
+            vec3 bmax = pos + halfSize;
+            hitObj = hitBox(bmin, bmax, r, tMin, tMax, temp);
+        }
+        
+        if (hitObj && temp.t < closest) {
+            hitFound = true;
+            closest = temp.t;
+            closestHit = temp;
+            // Оптимизация: ранний выход не применяем, так как нужно найти ближайший объект
+        }
+    }
+    
+    if (!hitFound) {
+        return vec3(0.1, 0.1, 0.1);
+    }
+    
+    // Проверяем, является ли объект выбранным (кэшируем проверку)
+    bool isSelected = (uSelectedObject >= 0 && closestHit.objIndex == uSelectedObject);
+    
+    // Читаем тип объекта и материал
+    int objTyp, matIdx;
+    vec3 objPos, objSize;
+    readObject(closestHit.objIndex, objTyp, matIdx, objPos, objSize);
+    
+    int matTyp;
+    vec3 albedo, emit;
+    readMaterialSimple(closestHit.matIndex, matTyp, albedo, emit);
+    
+    // Оптимизация: кэшируем нормаль
+    vec3 normal = closestHit.normal;
+    float ny = normal.y; // Кэшируем для быстрого доступа
+    
+    // MINECRAFT-СТИЛЬ ОСВЕЩЕНИЕ: оптимизированная версия
+    float brightness = 1.0;
+    
+    if (objTyp == OBJ_BOX || objTyp == OBJ_PLANE) {
+        // Оптимизация: используем кэшированное значение ny
+        if (ny > 0.9) {
+            brightness = 1.0;
+        } else if (ny < -0.9) {
+            brightness = 0.4;
+        } else {
+            brightness = 0.6;
+        }
+    } else if (objTyp == OBJ_SPHERE) {
+        // Оптимизация: предвычисляем lightDir один раз (константа)
+        const vec3 lightDir = vec3(0.4472136, 0.8944272, 0.2683282); // normalize(vec3(0.5, 1.0, 0.3))
+        float ndotl = max(0.0, dot(normal, lightDir));
+        brightness = 0.5 + ndotl * 0.5;
+    }
+    
+    // Базовый цвет с учетом яркости грани
+    vec3 color = albedo * brightness;
+    
+    // Оптимизация: используем switch-like структуру для материалов
+    if (matTyp == 3) { // MAT_EMISSIVE
+        color = emit * 3.0;
+    } else if (matTyp == 2) { // MAT_DIELECTRIC
+        const vec3 tint = vec3(0.85, 0.9, 0.95);
+        color = mix(color, tint * brightness, 0.4);
+    } else if (matTyp == 1 || matTyp == 4) { // MAT_METAL или MAT_MIRROR
+        color = mix(color, albedo * brightness * 1.3, 0.8);
+    }
+    
+    // Подсветка выбранного объекта - оптимизированная версия
+    if (isSelected) {
+        const vec3 selectionColor = vec3(0.0, 1.0, 0.0);
+        // Оптимизация: используем уже нормализованный r.dir (если он нормализован)
+        // Для упрощения используем -r.dir напрямую
+        vec3 viewDir = -rDir; // Оптимизация: не нормализуем, если r.dir уже нормализован
+        float viewDirLen2 = dot(viewDir, viewDir);
+        if (abs(viewDirLen2 - 1.0) > 0.01) {
+            viewDir *= inversesqrt(viewDirLen2);
+        }
+        
+        float viewDot = dot(viewDir, normal);
+        float edgeFactor = abs(viewDot);
+        
+        // Оптимизация: упрощенные проверки с предвычисленными константами
+        if (edgeFactor < 0.2) {
+            float edgeStrength = 1.0 - (edgeFactor * 5.0); // 1.0 / 0.2 = 5.0
+            color = mix(color, selectionColor, edgeStrength * 0.8);
+        } else if (edgeFactor < 0.5) {
+            float transition = (edgeFactor - 0.2) * 3.3333333; // 1.0 / 0.3
+            color = mix(color, selectionColor, (1.0 - transition) * 0.4);
+        } else {
+            color = mix(color, selectionColor, 0.15);
+        }
+    }
+    
+    // Ограничиваем яркость
+    color = min(color, vec3(1.0));
+    return color;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= uWidth || pix.y >= uHeight) return;
+    
+    uint state = uint(pix.y * uWidth + pix.x) + uFrameSeed;
+    
+    // Для wireframe используем один сэмпл
+    float u = float(pix.x) / float(uWidth - 1);
+    float fy = float(uHeight - 1 - pix.y);
+    float v = fy / float(uHeight - 1);
+    
+    Ray r;
+    buildCamera(vec2(u, v), r, state);
+    vec3 col = wireframeColor(r, state);
+    
+    // Пишем цвет напрямую
+    imageStore(destTex, pix, vec4(col, 1.0));
+}
+`
+		wireframeCs, err := compileShader(wireframeShader, gl.COMPUTE_SHADER)
+		if err != nil {
+			r.initErr = fmt.Errorf("compile wireframe shader: %w", err)
+			return
+		}
+		r.wireframeProgram = gl.CreateProgram()
+		gl.AttachShader(r.wireframeProgram, wireframeCs)
+		gl.LinkProgram(r.wireframeProgram)
+
+		var wireframeStatus int32
+		gl.GetProgramiv(r.wireframeProgram, gl.LINK_STATUS, &wireframeStatus)
+		if wireframeStatus == gl.FALSE {
+			var logLen int32
+			gl.GetProgramiv(r.wireframeProgram, gl.INFO_LOG_LENGTH, &logLen)
+			log := make([]byte, logLen+1)
+			gl.GetProgramInfoLog(r.wireframeProgram, logLen, nil, &log[0])
+			r.initErr = fmt.Errorf("link wireframe program: %s", string(log))
+			return
+		}
 	})
 
 	return r.initErr
@@ -1796,12 +2320,24 @@ func compileShader(src string, shaderType uint32) (uint32, error) {
 
 // renderOnce executes a very simple GPU render into img using the already
 // initialized GL context owned by the worker goroutine.
-func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) error {
+func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) error {
 	// --- Инициализация накопительного буфера ---
 	pixelCount := cfg.Width * cfg.Height
 	if pixelCount <= 0 {
 		return nil
 	}
+
+	// Проверяем, что размер изображения соответствует разрешению
+	expectedPixSize := pixelCount * 4 // RGBA = 4 байта на пиксель
+	if len(img.Pix) != expectedPixSize {
+		// Изображение имеет неправильный размер - ограничиваем pixelCount размером изображения для безопасности
+		// Ограничиваем pixelCount размером изображения
+		actualPixSize := len(img.Pix) / 4
+		if actualPixSize < pixelCount {
+			pixelCount = actualPixSize
+		}
+	}
+
 	if len(r.accum) != pixelCount*3 {
 		r.accum = make([]float32, pixelCount*3)
 	} else {
@@ -1822,7 +2358,7 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 			}
 		}
 		if progress != nil {
-			progress()
+			progress(1, 1)
 		}
 		return nil
 	}
@@ -2105,18 +2641,41 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 
 	// Resize texture if needed.
 	if r.width != cfg.Width || r.height != cfg.Height {
+		// Если размер изменился, нужно полностью переинициализировать все буферы
+		// и дождаться завершения всех операций перед началом нового рендеринга
+
+		// Сначала завершаем все ожидающие операции с PBO
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+		gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
+
 		r.width = cfg.Width
 		r.height = cfg.Height
 
 		gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
 		// HDR-подобный формат: RGBA16F, чтобы compute шейдер писал линейный цвет
 		// с меньшим квантованием. Читаем как float32.
-		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, int32(cfg.Width), int32(cfg.Height), 0, gl.RGBA, gl.FLOAT, nil)
+		// Инициализируем текстуру нулями (черный цвет) для предотвращения белой мути
+		texZeroData := make([]float32, cfg.Width*cfg.Height*4)
+		for i := range texZeroData {
+			texZeroData[i] = 0.0
+		}
+		gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, int32(cfg.Width), int32(cfg.Height), 0, gl.RGBA, gl.FLOAT, gl.Ptr(texZeroData))
 
+		// Инициализируем оба PBO для двойной буферизации
+		// Важно: полностью пересоздаем буферы, чтобы избежать проблем с размером
+		pboSize := cfg.Width * cfg.Height * 4 * 4 // 4 компоненты по 4 байта (float32) на пиксель
+
+		// Пересоздаем первый PBO
 		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
-		// 4 компоненты по 4 байта (float32) на пиксель
-		gl.BufferData(gl.PIXEL_PACK_BUFFER, cfg.Width*cfg.Height*4*4, nil, gl.STREAM_READ)
+		gl.BufferData(gl.PIXEL_PACK_BUFFER, pboSize, nil, gl.STREAM_READ)
+
+		// Пересоздаем второй PBO
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pboBack)
+		gl.BufferData(gl.PIXEL_PACK_BUFFER, pboSize, nil, gl.STREAM_READ)
+
+		// Сбрасываем состояние PBO
 		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+		r.pboIndex = 0 // Сбрасываем индекс - начинаем с первого PBO
 
 		// Инициализируем накопительный буфер на GPU
 		accumSize := pixelCount * 3 * 4 // 3 компоненты (RGB) по 4 байта (float32)
@@ -2126,6 +2685,9 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		zeroData := make([]float32, pixelCount*3)
 		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+
+		// Убеждаемся, что все операции завершены перед началом нового рендеринга
+		gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
 	}
 
 	// Загружаем материалы/объекты/камеру/небо
@@ -2161,7 +2723,13 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	gl.BindBufferBase(gl.UNIFORM_BUFFER, 5, r.fogUBO)
 	gl.BufferData(gl.UNIFORM_BUFFER, len(fogBlock)*4, gl.Ptr(fogBlock[:]), gl.DYNAMIC_DRAW)
 
-	gl.UseProgram(r.program)
+	// Выбираем шейдер в зависимости от режима рендеринга
+	isWireframe := GetRenderMode() == 1
+	currentProgram := r.program
+	if isWireframe {
+		currentProgram = r.wireframeProgram
+	}
+	gl.UseProgram(currentProgram)
 
 	// Bind image for compute shader: формат должен совпадать с внутренним форматом текстуры (RGBA16F).
 	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA16F)
@@ -2170,19 +2738,22 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 7, r.accumSSBO)
 
 	// Set uniforms.
-	locW := gl.GetUniformLocation(r.program, gl.Str("uWidth\x00"))
-	locH := gl.GetUniformLocation(r.program, gl.Str("uHeight\x00"))
-	locSpp := gl.GetUniformLocation(r.program, gl.Str("uSamplesPerPx\x00"))
-	locDepth := gl.GetUniformLocation(r.program, gl.Str("uMaxDepth\x00"))
-	locSeed := gl.GetUniformLocation(r.program, gl.Str("uFrameSeed\x00"))
-	locSampleCount := gl.GetUniformLocation(r.program, gl.Str("uSampleCount\x00"))
+	locW := gl.GetUniformLocation(currentProgram, gl.Str("uWidth\x00"))
+	locH := gl.GetUniformLocation(currentProgram, gl.Str("uHeight\x00"))
+	locSpp := gl.GetUniformLocation(currentProgram, gl.Str("uSamplesPerPx\x00"))
+	locDepth := gl.GetUniformLocation(currentProgram, gl.Str("uMaxDepth\x00"))
+	locSeed := gl.GetUniformLocation(currentProgram, gl.Str("uFrameSeed\x00"))
+	locSampleCount := gl.GetUniformLocation(currentProgram, gl.Str("uSampleCount\x00"))
+	locSelectedObject := gl.GetUniformLocation(currentProgram, gl.Str("uSelectedObject\x00"))
 
 	gl.Uniform1i(locW, int32(cfg.Width))
 	gl.Uniform1i(locH, int32(cfg.Height))
 	gl.Uniform1i(locDepth, int32(cfg.MaxDepth))
+	gl.Uniform1i(locSelectedObject, int32(GetSelectedObject())) // Выбранный объект
 
 	// Инициализируем накопительный буфер нулями при начале нового рендера
-	if r.width == cfg.Width && r.height == cfg.Height {
+	// Для wireframe накопительный буфер не используется, поэтому не очищаем его
+	if !isWireframe && r.width == cfg.Width && r.height == cfg.Height {
 		// Размер не изменился - просто очищаем существующий буфер
 		accumSize := pixelCount * 3 * 4
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.accumSSBO)
@@ -2201,118 +2772,294 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	// Временный буфер для чтения данных с GPU (RGBA16F -> float32)
 	tmp := make([]float32, pixelCount*4)
 
-	// Сколько проходов выполнять (по одному сэмплу за проход)
-	passes := cfg.SamplesPerPx
-	if passes < 1 {
-		passes = 1
-	}
-	updateEvery := passes / 10
-	if updateEvery < 1 {
-		updateEvery = 1
+	// Для wireframe режима семплов быть не должно - рендерим один кадр
+	// Для path tracing используем семплы
+	var passes int
+	if isWireframe {
+		passes = 1 // Wireframe рендерится одним кадром без семплов
+	} else {
+		passes = cfg.SamplesPerPx
+		if passes < 1 {
+			passes = 1
+		}
 	}
 
 	for s := 0; s < passes; s++ {
-		// Один сэмпл на проход
-		gl.Uniform1i(locSpp, 1)
-		gl.Uniform1i(locSampleCount, int32(s+1)) // Количество накопленных сэмплов
-		gl.Uniform1ui(locSeed, uint32(time.Now().UnixNano())+uint32(s))
+		// Для wireframe режима семплы не используются - рендерим один кадр
+		// Для path tracing используем семплы
+		if !isWireframe {
+			gl.Uniform1i(locSpp, 1)
+			gl.Uniform1i(locSampleCount, int32(s+1)) // Количество накопленных сэмплов
+			gl.Uniform1ui(locSeed, uint32(time.Now().UnixNano())+uint32(s))
+		} else {
+			// Для wireframe устанавливаем минимальные значения
+			gl.Uniform1i(locSpp, 1)
+			gl.Uniform1i(locSampleCount, 1)
+			gl.Uniform1ui(locSeed, uint32(time.Now().UnixNano()))
+		}
+		gl.Uniform1i(locSelectedObject, int32(GetSelectedObject())) // Выбранный объект
 
 		// Запуск compute shader
 		groupsX := (cfg.Width + 15) / 16
 		groupsY := (cfg.Height + 15) / 16
 		gl.DispatchCompute(uint32(groupsX), uint32(groupsY), 1)
 
-		gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.SHADER_STORAGE_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT)
+		// Минимальная синхронизация - только то, что необходимо для следующей операции
+		// Не блокируем GPU лишними барьерами - это позволяет GPU работать параллельно
+		gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
 
-		// Читаем результат только при обновлении UI (не на каждом проходе!)
-		// Периодически обновляем img и вызываем progress()
-		if (s%updateEvery) == updateEvery-1 || s == passes-1 {
-			// Читаем накопленный результат с GPU
-			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
-			gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
-			gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
+		// Для wireframe обновляем всегда (один кадр)
+		// Для path tracing обновляем периодически для предотвращения мерцания
+		shouldUpdate := isWireframe || (s+1)%5 == 0 || (s+1) == passes
 
-			ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
-			if ptr != nil {
-				src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
-				copy(tmp, src)
-				gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
+		if shouldUpdate {
+			if isWireframe {
+				// Для wireframe используем PBO для надежного чтения
+				// Сначала синхронизируем, чтобы убедиться, что шейдер завершил работу
+				gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT)
+
+				// Используем основной PBO для wireframe
+				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
+				gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
+				gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
+
+				// Синхронизируем перед чтением из PBO
+				gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
+
+				// Читаем данные из PBO
+				ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
+				if ptr != nil {
+					// Проверяем размер перед копированием
+					expectedLen := len(tmp)
+					src := ((*[1 << 28]float32)(ptr))[:expectedLen]
+					copy(tmp, src)
+					gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
+				} else {
+					// Если не удалось прочитать, заполняем темно-серым чтобы избежать белого экрана
+					for i := 0; i < len(tmp); i += 4 {
+						if i+3 < len(tmp) {
+							tmp[i] = 0.1   // R
+							tmp[i+1] = 0.1 // G
+							tmp[i+2] = 0.1 // B
+							tmp[i+3] = 1.0 // A
+						}
+					}
+				}
+				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+			} else {
+				// Для path tracing используем двойной PBO для асинхронного чтения
+				// Выбираем текущий PBO для записи нового кадра
+				currentPBO := r.pbo
+				if r.pboIndex == 1 {
+					currentPBO = r.pboBack
+				}
+
+				// Читаем данные из предыдущего PBO (если это не первый кадр)
+				if s > 0 {
+					readPBO := r.pboBack
+					if r.pboIndex == 1 {
+						readPBO = r.pbo
+					}
+
+					// Пытаемся прочитать данные из предыдущего PBO асинхронно
+					gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readPBO)
+					ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
+					if ptr != nil {
+						// Данные готовы - копируем
+						src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
+						copy(tmp, src)
+						gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
+					}
+				}
+
+				// Начинаем чтение текущего кадра в текущий PBO (асинхронно)
+				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, currentPBO)
+				gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
+				gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
+
+				// Для последнего кадра ждем завершения и читаем синхронно
+				if (s + 1) == passes {
+					gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
+					ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
+					if ptr != nil {
+						src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
+						copy(tmp, src)
+						gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
+					}
+				}
+
+				// Переключаем PBO для следующего кадра
+				r.pboIndex = 1 - r.pboIndex
+				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 			}
-			gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 
-			// Обрабатываем данные из текстуры (уже усредненные на GPU)
+			// Обрабатываем данные из текстуры
 			dst := img.Pix
-			for i := 0; i < pixelCount; i++ {
-				off := i * 4
-				rLin := tmp[off]
-				gLin := tmp[off+1]
-				bLin := tmp[off+2]
-
-				// Ограничиваем линейный цвет
-				if rLin < 0 {
-					rLin = 0
-				}
-				if gLin < 0 {
-					gLin = 0
-				}
-				if bLin < 0 {
-					bLin = 0
-				}
-
-				// ACES-подобный тон-маппинг из HDR в [0,1]
-				rTm := acesTonemap(rLin)
-				gTm := acesTonemap(gLin)
-				bTm := acesTonemap(bLin)
-
-				// Гамма-коррекция (переход в sRGB, gamma ~2.0 как в CPU-рендере)
-				rGamma := float32(math.Sqrt(float64(rTm)))
-				gGamma := float32(math.Sqrt(float64(gTm)))
-				bGamma := float32(math.Sqrt(float64(bTm)))
-				if rGamma > 1 {
-					rGamma = 1
-				}
-				if gGamma > 1 {
-					gGamma = 1
-				}
-				if bGamma > 1 {
-					bGamma = 1
-				}
-
-				dst[off] = uint8(rGamma*255.0 + 0.5)
-				dst[off+1] = uint8(gGamma*255.0 + 0.5)
-				dst[off+2] = uint8(bGamma*255.0 + 0.5)
-				dst[off+3] = 255
+			// Безопасная проверка размера перед циклом
+			maxPixels := len(dst) / 4
+			actualPixelCount := pixelCount
+			if maxPixels < pixelCount {
+				// Изображение меньше ожидаемого - ограничиваем цикл
+				actualPixelCount = maxPixels
 			}
 
-			if progress != nil {
-				progress()
-			}
+			if isWireframe {
+				// Для wireframe шейдер уже выдает финальный цвет в диапазоне [0,1]
+				// Просто конвертируем в uint8 без тон-маппинга и гамма-коррекции
+				for i := 0; i < actualPixelCount; i++ {
+					off := i * 4
+					if off+3 >= len(dst) || off+3 >= len(tmp) {
+						break // Защита от выхода за границы
+					}
+					rVal := tmp[off]
+					gVal := tmp[off+1]
+					bVal := tmp[off+2]
+					// Игнорируем альфа-канал из текстуры, используем только RGB
 
-			// Денойзинг выполняется только в конце рендеринга для производительности
-			// (пропускаем промежуточные обновления)
+					// Ограничиваем и конвертируем в uint8
+					if rVal < 0 {
+						rVal = 0
+					} else if rVal > 1 {
+						rVal = 1
+					}
+					if gVal < 0 {
+						gVal = 0
+					} else if gVal > 1 {
+						gVal = 1
+					}
+					if bVal < 0 {
+						bVal = 0
+					} else if bVal > 1 {
+						bVal = 1
+					}
+
+					// Конвертируем в uint8 с правильным округлением
+					dst[off] = uint8(rVal*255.0 + 0.5)
+					dst[off+1] = uint8(gVal*255.0 + 0.5)
+					dst[off+2] = uint8(bVal*255.0 + 0.5)
+					dst[off+3] = 255 // Альфа всегда непрозрачная
+				}
+			} else {
+				// Для path tracing применяем тон-маппинг и гамма-коррекцию
+				for i := 0; i < actualPixelCount; i++ {
+					off := i * 4
+					if off+3 >= len(dst) || off+3 >= len(tmp) {
+						break // Защита от выхода за границы
+					}
+					rLin := tmp[off]
+					gLin := tmp[off+1]
+					bLin := tmp[off+2]
+
+					// Ограничиваем линейный цвет
+					if rLin < 0 {
+						rLin = 0
+					}
+					if gLin < 0 {
+						gLin = 0
+					}
+					if bLin < 0 {
+						bLin = 0
+					}
+
+					// ACES-подобный тон-маппинг из HDR в [0,1]
+					rTm := acesTonemap(rLin)
+					gTm := acesTonemap(gLin)
+					bTm := acesTonemap(bLin)
+
+					// Гамма-коррекция (переход в sRGB, gamma ~2.0 как в CPU-рендере)
+					rGamma := float32(math.Sqrt(float64(rTm)))
+					gGamma := float32(math.Sqrt(float64(gTm)))
+					bGamma := float32(math.Sqrt(float64(bTm)))
+					if rGamma > 1 {
+						rGamma = 1
+					}
+					if gGamma > 1 {
+						gGamma = 1
+					}
+					if bGamma > 1 {
+						bGamma = 1
+					}
+
+					dst[off] = uint8(rGamma*255.0 + 0.5)
+					dst[off+1] = uint8(gGamma*255.0 + 0.5)
+					dst[off+2] = uint8(bGamma*255.0 + 0.5)
+					dst[off+3] = 255
+				}
+			}
+		}
+
+		// Всегда обновляем прогресс, но не всегда обновляем изображение
+		if progress != nil {
+			progress(s+1, passes)
 		}
 	}
 
 	// Финальная обработка: денойзинг и сглаживание только в конце
 	// Читаем финальный результат с GPU
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
+	// Используем MemoryBarrier вместо Finish для лучшей производительности
+	gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT | gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+	// Используем текущий PBO
+	currentPBO := r.pbo
+	if r.pboIndex == 1 {
+		currentPBO = r.pboBack
+	}
+
+	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, currentPBO)
 	gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
 	gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
+
+	// Синхронизируем перед чтением из PBO
+	gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
 
 	ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
 	dst := img.Pix
 	if ptr != nil {
 		tmp := make([]float32, pixelCount*4)
+		// Инициализируем нулями для предотвращения остаточных значений
+		for i := range tmp {
+			tmp[i] = 0.0
+		}
 		src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
 		copy(tmp, src)
 		gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 
+		// Убеждаемся, что все значения в tmp валидны (не NaN, не Inf)
+		// Это предотвращает появление белой пленки из-за некорректных значений
+		for i := 0; i < len(tmp); i++ {
+			val := tmp[i]
+			if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
+				tmp[i] = 0.0
+			}
+		}
+
 		// Обрабатываем финальные данные
-		for i := 0; i < pixelCount; i++ {
+		// Безопасная проверка размера перед циклом
+		maxPixels := len(dst) / 4
+		actualPixelCount := pixelCount
+		if maxPixels < pixelCount {
+			// Изображение меньше ожидаемого - ограничиваем цикл
+			actualPixelCount = maxPixels
+		}
+		for i := 0; i < actualPixelCount; i++ {
 			off := i * 4
+			if off+3 >= len(dst) || off+3 >= len(tmp) {
+				break // Защита от выхода за границы
+			}
 			rLin := tmp[off]
 			gLin := tmp[off+1]
 			bLin := tmp[off+2]
+
+			// Проверяем на NaN и Inf перед обработкой (предотвращает белесую пленку)
+			if math.IsNaN(float64(rLin)) || math.IsInf(float64(rLin), 0) {
+				rLin = 0
+			}
+			if math.IsNaN(float64(gLin)) || math.IsInf(float64(gLin), 0) {
+				gLin = 0
+			}
+			if math.IsNaN(float64(bLin)) || math.IsInf(float64(bLin), 0) {
+				bLin = 0
+			}
 
 			// Ограничиваем линейный цвет
 			if rLin < 0 {
@@ -2521,7 +3268,7 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 
 	// Финальное обновление UI после всех обработок
 	if progress != nil {
-		progress()
+		progress(cfg.SamplesPerPx, cfg.SamplesPerPx)
 	}
 
 	return nil
@@ -2531,7 +3278,7 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 // dedicated GL worker and waits for completion.
 // For now it just draws a test gradient using a compute shader to verify GPU path.
 // Later this can be replaced with a full path tracer that uses sc and cfg.
-func Render(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func()) error {
+func Render(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) error {
 	ensureWorker()
 	done := make(chan error, 1)
 	req := renderRequest{

@@ -1,0 +1,1004 @@
+\documentclass[14pt, a4paper]{extarticle}
+\usepackage[utf8]{inputenc}
+\usepackage{cmap}
+\usepackage[T2A]{fontenc}
+\usepackage[russian]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{geometry}
+\usepackage{breqn}
+\allowdisplaybreaks
+\geometry{
+    top=2cm,
+    bottom=2cm,
+    left=3cm,
+    right=2cm
+}
+
+\begin{document}
+
+\title{Математическое обоснование работы патрейсера на видеокарте}
+\author{}
+\date{}
+\maketitle
+
+\section{Введение и архитектура}
+
+\subsection{Обзор GPU патрейсинга}
+
+Path tracing (патрейсинг) --- это метод фотореалистичного рендеринга, основанный на решении уравнения рендеринга методом Монте-Карло. Выполнение патрейсинга на GPU (Graphics Processing Unit) позволяет значительно ускорить вычисления благодаря массивному параллелизму.
+
+Основная идея заключается в том, что каждый пиксель изображения обрабатывается независимо, что идеально подходит для параллельной архитектуры GPU. Каждый поток GPU вычисляет цвет одного пикселя, трассируя множество случайных лучей и усредняя результаты.
+
+\subsection{Архитектура OpenGL Compute Shaders}
+
+В данной реализации используется OpenGL 4.3+ с поддержкой compute shaders. Compute shader --- это специальный тип шейдера, который позволяет выполнять произвольные вычисления на GPU без привязки к графическому конвейеру.
+
+Архитектура compute shader основана на концепции work groups (рабочих групп). Каждая рабочая группа содержит фиксированное количество потоков (threads), которые выполняются параллельно. В нашем случае используется размер рабочей группы $16 \times 16 = 256$ потоков.
+
+\subsection{Структура данных на GPU}
+
+Данные передаются на GPU через специальные буферы:
+\begin{itemize}
+    \item \textbf{Uniform Buffer Objects (UBO)} --- для постоянных данных (камера, небо, туман)
+    \item \textbf{Shader Storage Buffer Objects (SSBO)} --- для массивов данных (материалы, объекты, накопительный буфер)
+    \item \textbf{Image2D} --- для выходного изображения (текстура RGBA16F)
+\end{itemize}
+
+\section{Форматы данных и передача на GPU}
+
+\subsection{Uniform Buffer Objects (UBO) --- формат std140}
+
+Uniform Buffer Objects используют выравнивание std140, которое гарантирует определенную структуру размещения данных в памяти. Это необходимо для корректного доступа к данным из шейдера.
+
+\subsubsection{Блок камеры}
+
+Камера передается как структура из 16 float32 (4 vec4), что составляет 64 байта:
+
+\begin{align}
+\text{CameraBlock} &= \begin{bmatrix}
+\text{camPos} & \text{(vec4, 16 байт)} \\
+\text{camTarget} & \text{(vec4, 16 байт)} \\
+\text{camUp} & \text{(vec4, 16 байт)} \\
+\text{camFov, camAperture, camFocusDist, camAspect} & \text{(4 float, 16 байт)}
+\end{bmatrix}
+\end{align}
+
+Математически позиция камеры $\mathbf{c}_{\text{pos}}$, цель $\mathbf{c}_{\text{target}}$ и вектор вверх $\mathbf{c}_{\text{up}}$ определяют систему координат камеры.
+
+\subsubsection{Блок неба}
+
+Небо передается как структура с выравниванием std140:
+
+\begin{align}
+\text{SkyBlock} &= \begin{bmatrix}
+\text{skyType} & \text{(float, 4 байта + 12 байт padding)} \\
+\text{skyColor} & \text{(vec4, 16 байт)} \\
+\text{skyHorizon} & \text{(vec4, 16 байт)} \\
+\text{skyZenith} & \text{(vec4, 16 байт)}
+\end{bmatrix}
+\end{align}
+
+Общий размер: 64 байта (выравнивание std140 требует, чтобы каждый элемент занимал кратные 16 байт).
+
+\subsubsection{Блок тумана}
+
+Туман содержит физические параметры объемного рассеяния:
+
+\begin{align}
+\text{FogBlock} &= \begin{bmatrix}
+\text{fogDensity, fogScatter, fogAffectSky, fogGpuVolumetric} & \text{(4 float)} \\
+\text{fogColor} & \text{(vec4)} \\
+\text{fogSigmaS, fogSigmaA, fogG} & \text{(3 float + padding)} \\
+\text{fogHeteroStrength, fogNoiseScale, fogNoiseOctaves} & \text{(3 float + padding)}
+\end{bmatrix}
+\end{align}
+
+Ключевые физические параметры:
+\begin{itemize}
+    \item $\sigma_s$ --- коэффициент рассеяния (scattering coefficient)
+    \item $\sigma_a$ --- коэффициент поглощения (absorption coefficient)
+    \item $\sigma_t = \sigma_s + \sigma_a$ --- коэффициент экстинкции (extinction coefficient)
+    \item $g$ --- параметр анизотропии фазовой функции Хеньи-Грина
+\end{itemize}
+
+\subsection{Shader Storage Buffer Objects (SSBO) --- формат std430}
+
+SSBO используют более компактное выравнивание std430, которое не требует padding между элементами массивов.
+
+\subsubsection{Буфер материалов}
+
+Каждый материал занимает 20 float32 (80 байт):
+
+\begin{align}
+\text{matData}[i] &= \begin{bmatrix}
+\text{type} & \text{(float, индекс 0)} \\
+\text{rough} & \text{(float, индекс 1)} \\
+\text{ior} & \text{(float, индекс 2)} \\
+\text{smoothness} & \text{(float, индекс 3)} \\
+\text{albedo.r, albedo.g, albedo.b} & \text{(float, индексы 4-6)} \\
+\text{reflectivity} & \text{(float, индекс 7)} \\
+\text{emit.r, emit.g, emit.b} & \text{(float, индексы 8-10)} \\
+\text{pad0} & \text{(float, индекс 11)} \\
+\text{absorption.r, absorption.g, absorption.b} & \text{(float, индексы 12-14)} \\
+\text{absorptionScale} & \text{(float, индекс 15)} \\
+\text{tint.r, tint.g, tint.b} & \text{(float, индексы 16-18)} \\
+\text{pad2} & \text{(float, индекс 19)}
+\end{bmatrix}
+\end{align}
+
+Размер буфера материалов:
+\[
+\text{size}_{\text{materials}} = N_{\text{materials}} \times 20 \times 4 \text{ байт} = 80N_{\text{materials}} \text{ байт}
+\]
+
+где $N_{\text{materials}}$ --- количество материалов в сцене.
+
+\subsubsection{Буфер объектов}
+
+Каждый объект занимает 12 float32 (48 байт):
+
+\begin{align}
+\text{objData}[i] &= \begin{bmatrix}
+\text{type} & \text{(float, индекс 0)} \\
+\text{materialIndex} & \text{(float, индекс 1)} \\
+\text{pad0, pad1} & \text{(float, индексы 2-3)} \\
+\text{pos.x, pos.y, pos.z} & \text{(float, индексы 4-6)} \\
+\text{pad2} & \text{(float, индекс 7)} \\
+\text{size.x, size.y, size.z} & \text{(float, индексы 8-10)} \\
+\text{pad3} & \text{(float, индекс 11)}
+\end{bmatrix}
+\end{align}
+
+Размер буфера объектов:
+\[
+\text{size}_{\text{objects}} = N_{\text{objects}} \times 12 \times 4 \text{ байт} = 48N_{\text{objects}} \text{ байт}
+\]
+
+\subsubsection{Буфер индексов источников света}
+
+Список индексов эмиссивных объектов хранится как массив int32:
+
+\[
+\text{lightIndices} = [i_1, i_2, \ldots, i_{N_{\text{lights}}}]
+\]
+
+где $i_j$ --- индекс объекта-источника света в массиве объектов.
+
+Размер:
+\[
+\text{size}_{\text{lights}} = N_{\text{lights}} \times 4 \text{ байт}
+\]
+
+\subsubsection{Накопительный буфер}
+
+Накопительный буфер хранит сумму всех сэмплов для каждого пикселя:
+
+\[
+\text{accumData}[i] = [R_i, G_i, B_i]
+\]
+
+где $i = y \times W + x$ --- линейный индекс пикселя с координатами $(x, y)$.
+
+Размер накопительного буфера:
+\[
+\text{size}_{\text{accum}} = W \times H \times 3 \times 4 \text{ байт} = 12WH \text{ байт}
+\]
+
+где $W$ --- ширина изображения, $H$ --- высота изображения.
+
+\section{Распараллеливание вычислений}
+
+\subsection{Work Group размер}
+
+Compute shader использует фиксированный размер рабочей группы (work group):
+
+\[
+\text{local\_size\_x} = 16, \quad \text{local\_size\_y} = 16
+\]
+
+Это означает, что каждая рабочая группа содержит $16 \times 16 = 256$ потоков, которые выполняются параллельно на одном вычислительном блоке GPU.
+
+\subsection{Диспетчеризация compute shader}
+
+Количество рабочих групп вычисляется по формулам:
+
+\begin{align}
+\text{groupsX} &= \left\lceil \frac{W}{16} \right\rceil = \left\lfloor \frac{W + 15}{16} \right\rfloor \\
+\text{groupsY} &= \left\lceil \frac{H}{16} \right\rceil = \left\lfloor \frac{H + 15}{16} \right\rfloor
+\end{align}
+
+где $\lceil \cdot \rceil$ --- функция округления вверх (ceiling), $\lfloor \cdot \rfloor$ --- округление вниз (floor).
+
+Общее количество рабочих групп:
+\[
+N_{\text{groups}} = \text{groupsX} \times \text{groupsY}
+\]
+
+Общее количество потоков (может превышать количество пикселей):
+\[
+N_{\text{threads}} = N_{\text{groups}} \times 256
+\]
+
+\subsection{Глобальный индекс пикселя}
+
+Каждый поток имеет уникальный глобальный индекс, вычисляемый как:
+
+\begin{align}
+\text{pix}_x &= \text{gl\_GlobalInvocationID.x} \\
+\text{pix}_y &= \text{gl\_GlobalInvocationID.y}
+\end{align}
+
+где $\text{gl\_GlobalInvocationID}$ --- встроенная переменная OpenGL, содержащая глобальные координаты потока.
+
+Линейный индекс пикселя:
+\[
+\text{pixIdx} = \text{pix}_y \times W + \text{pix}_x
+\]
+
+\subsection{Инициализация генератора случайных чисел}
+
+Для обеспечения детерминированности и воспроизводимости результатов, каждый поток инициализирует свой генератор случайных чисел на основе координат пикселя и seed кадра:
+
+\[
+\text{state}_0 = \text{hash}(\text{pix}_x \times 1973 \oplus \text{pix}_y \times 9277 \oplus \text{frameSeed})
+\]
+
+где $\oplus$ --- операция XOR, $\text{hash}$ --- хэш-функция для генерации псевдослучайных чисел.
+
+Хэш-функция реализуется как последовательность битовых операций:
+
+\begin{align}
+x_1 &= x \oplus (x \gg 17) \\
+x_2 &= x_1 \times 0\text{xED5AD4BB} \\
+x_3 &= x_2 \oplus (x_2 \gg 11) \\
+x_4 &= x_3 \times 0\text{xAC4C1B51} \\
+x_5 &= x_4 \oplus (x_4 \gg 15) \\
+\text{hash}(x) &= (x_5 \times 0\text{x31848BAB}) \oplus (x_5 \gg 14)
+\end{align}
+
+где $\gg$ --- побитовый сдвиг вправо.
+
+\section{Генерация первичных лучей}
+
+\subsection{Построение системы координат камеры}
+
+Система координат камеры определяется тремя ортогональными векторами:
+
+\begin{align}
+\mathbf{w} &= \frac{\mathbf{c}_{\text{pos}} - \mathbf{c}_{\text{target}}}{\|\mathbf{c}_{\text{pos}} - \mathbf{c}_{\text{target}}\|} \\
+\mathbf{u} &= \frac{\mathbf{c}_{\text{up}} \times \mathbf{w}}{\|\mathbf{c}_{\text{up}} \times \mathbf{w}\|} \\
+\mathbf{v} &= \mathbf{w} \times \mathbf{u}
+\end{align}
+
+где $\mathbf{w}$ направлен от цели к позиции камеры (обратное направление взгляда), $\mathbf{u}$ --- вектор вправо, $\mathbf{v}$ --- вектор вверх.
+
+\subsection{Вычисление размеров viewport}
+
+Размеры viewport вычисляются на основе поля зрения (FOV) и соотношения сторон:
+
+\begin{align}
+\theta &= \frac{\text{FOV} \times \pi}{180} \quad \text{(преобразование из градусов в радианы)} \\
+h &= \tan\left(\frac{\theta}{2}\right) \\
+\text{viewportHeight} &= 2h \\
+\text{viewportWidth} &= \text{aspect} \times \text{viewportHeight}
+\end{align}
+
+где $\text{aspect} = W/H$ --- соотношение сторон изображения.
+
+\subsection{Построение луча без глубины резкости}
+
+Для простой камеры (без DOF) луч строится следующим образом:
+
+\begin{align}
+u &= \frac{\text{pix}_x + \xi_x}{W - 1} \quad \text{(нормализованные координаты [0, 1])} \\
+v &= \frac{H - 1 - \text{pix}_y + \xi_y}{H - 1}
+\end{align}
+
+где $\xi_x, \xi_y \in [0, 1]$ --- случайные смещения для сэмплирования внутри пикселя.
+
+Направление луча:
+\begin{align}
+\mathbf{horizontal} &= \text{viewportWidth} \times \text{focusDist} \times \mathbf{u} \\
+\mathbf{vertical} &= \text{viewportHeight} \times \text{focusDist} \times \mathbf{v} \\
+\mathbf{lowerLeftCorner} &= \mathbf{c}_{\text{pos}} - \frac{1}{2}\mathbf{horizontal} - \frac{1}{2}\mathbf{vertical} - \text{focusDist} \times \mathbf{w} \\
+\mathbf{dir} &= \mathbf{lowerLeftCorner} + u \times \mathbf{horizontal} + v \times \mathbf{vertical} - \mathbf{c}_{\text{pos}} \\
+\mathbf{r}_{\text{dir}} &= \frac{\mathbf{dir}}{\|\mathbf{dir}\|}
+\end{align}
+
+Начало луча:
+\[
+\mathbf{r}_{\text{orig}} = \mathbf{c}_{\text{pos}}
+\]
+
+\subsection{Генерация луча с учетом глубины резкости (DOF)}
+
+Для камеры с диафрагмой (aperture $> 0$) луч генерируется с учетом глубины резкости:
+
+\begin{align}
+\text{lensRadius} &= \frac{\text{aperture}}{2} \\
+\mathbf{rd} &= \text{lensRadius} \times \text{randomInUnitSphere}() \\
+\mathbf{offset} &= \mathbf{u} \times \mathbf{rd}_x + \mathbf{v} \times \mathbf{rd}_y \\
+\mathbf{r}_{\text{orig}} &= \mathbf{c}_{\text{pos}} + \mathbf{offset} \\
+\mathbf{dir} &= \mathbf{lowerLeftCorner} + u \times \mathbf{horizontal} + v \times \mathbf{vertical} - \mathbf{r}_{\text{orig}} \\
+\mathbf{r}_{\text{dir}} &= \frac{\mathbf{dir}}{\|\mathbf{dir}\|}
+\end{align}
+
+\subsection{Stratified Sampling}
+
+Для уменьшения дисперсии (variance) используется стратифицированное сэмплирование. Пиксель разбивается на $N \times N$ страт (обычно $N = 4$, что дает 16 страт):
+
+\begin{align}
+\text{strataSize} &= 4 \\
+\text{totalStrata} &= \text{strataSize}^2 = 16 \\
+\text{samplesPerStratum} &= \left\lfloor \frac{N_{\text{samples}}}{\text{totalStrata}} \right\rfloor \\
+\text{extraSamples} &= N_{\text{samples}} - \text{samplesPerStratum} \times \text{totalStrata}
+\end{align}
+
+Для каждой страты $(s_x, s_y)$ генерируются случайные смещения:
+
+\begin{align}
+\xi_x, \xi_y &\sim \mathcal{U}(0, 1) \quad \text{(равномерное распределение)} \\
+\text{stratumU} &= \frac{s_x + \xi_x}{\text{strataSize}} \\
+\text{stratumV} &= \frac{s_y + \xi_y}{\text{strataSize}} \\
+u &= \frac{\text{pix}_x + \text{stratumU}}{W - 1} \\
+v &= \frac{H - 1 - \text{pix}_y + \text{stratumV}}{H - 1}
+\end{align}
+
+\section{Пересечение лучей с объектами}
+
+\subsection{Пересечение со сферой}
+
+Луч задается параметрическим уравнением:
+\[
+\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}, \quad t > 0
+\]
+
+где $\mathbf{o}$ --- начало луча, $\mathbf{d}$ --- направление луча (нормализовано).
+
+Сфера задается центром $\mathbf{c}$ и радиусом $r$. Подставляя уравнение луча в уравнение сферы:
+
+\[
+\|\mathbf{r}(t) - \mathbf{c}\|^2 = r^2
+\]
+
+Раскрывая скобки:
+
+\begin{align}
+\|\mathbf{o} + t\mathbf{d} - \mathbf{c}\|^2 &= r^2 \\
+\|\mathbf{o} - \mathbf{c} + t\mathbf{d}\|^2 &= r^2 \\
+(\mathbf{o} - \mathbf{c} + t\mathbf{d}) \cdot (\mathbf{o} - \mathbf{c} + t\mathbf{d}) &= r^2
+\end{align}
+
+Раскрывая скалярное произведение:
+
+\begin{align}
+\|\mathbf{o} - \mathbf{c}\|^2 + 2t(\mathbf{o} - \mathbf{c}) \cdot \mathbf{d} + t^2\|\mathbf{d}\|^2 &= r^2
+\end{align}
+
+Поскольку $\mathbf{d}$ нормализован, $\|\mathbf{d}\|^2 = 1$. Получаем квадратное уравнение:
+
+\begin{align}
+at^2 + bt + c &= 0
+\end{align}
+
+где:
+\begin{align}
+a &= \|\mathbf{d}\|^2 = 1 \\
+b &= 2(\mathbf{o} - \mathbf{c}) \cdot \mathbf{d} \\
+c &= \|\mathbf{o} - \mathbf{c}\|^2 - r^2
+\end{align}
+
+Дискриминант:
+\[
+\Delta = b^2 - 4ac = b^2 - 4c
+\]
+
+Если $\Delta < 0$, пересечений нет. Иначе:
+
+\[
+t = \frac{-b \pm \sqrt{\Delta}}{2a} = \frac{-b \pm \sqrt{\Delta}}{2}
+\]
+
+Выбирается минимальное положительное $t$ в диапазоне $[t_{\min}, t_{\max}]$.
+
+Нормаль в точке пересечения:
+\[
+\mathbf{n} = \frac{\mathbf{r}(t) - \mathbf{c}}{r}
+\]
+
+\subsection{Пересечение с плоскостью}
+
+Плоскость задается точкой $\mathbf{p}$ и нормалью $\mathbf{n}$ (нормализована). Уравнение плоскости:
+
+\[
+(\mathbf{x} - \mathbf{p}) \cdot \mathbf{n} = 0
+\]
+
+Подставляя параметрическое уравнение луча:
+
+\begin{align}
+(\mathbf{o} + t\mathbf{d} - \mathbf{p}) \cdot \mathbf{n} &= 0 \\
+(\mathbf{o} - \mathbf{p}) \cdot \mathbf{n} + t(\mathbf{d} \cdot \mathbf{n}) &= 0
+\end{align}
+
+Отсюда:
+
+\[
+t = \frac{(\mathbf{p} - \mathbf{o}) \cdot \mathbf{n}}{\mathbf{d} \cdot \mathbf{n}}
+\]
+
+Если $|\mathbf{d} \cdot \mathbf{n}| < \epsilon$ (луч параллелен плоскости), пересечения нет. Иначе проверяется, что $t \in [t_{\min}, t_{\max}]$.
+
+Точка пересечения:
+\[
+\mathbf{hit} = \mathbf{o} + t\mathbf{d}
+\]
+
+Нормаль: $\mathbf{n}$ (уже известна).
+
+\subsection{Пересечение с кубом (AABB)}
+
+Ограничивающий параллелепипед (Axis-Aligned Bounding Box, AABB) задается двумя точками $\mathbf{b}_{\min}$ и $\mathbf{b}_{\max}$.
+
+Для каждой оси $i \in \{x, y, z\}$ вычисляются параметры пересечения:
+
+\begin{align}
+t_{\text{near},i} &= \frac{b_{\min,i} - o_i}{d_i} \\
+t_{\text{far},i} &= \frac{b_{\max,i} - o_i}{d_i}
+\end{align}
+
+Если $d_i < 0$, луч идет в обратном направлении, поэтому значения меняются местами:
+
+\begin{align}
+\text{if } d_i < 0: \quad &t_{\text{near},i} \leftrightarrow t_{\text{far},i}
+\end{align}
+
+Итоговые параметры пересечения:
+
+\begin{align}
+t_{\text{near}} &= \max(t_{\text{near},x}, t_{\text{near},y}, t_{\text{near},z}) \\
+t_{\text{far}} &= \min(t_{\text{far},x}, t_{\text{far},y}, t_{\text{far},z})
+\end{align}
+
+Пересечение существует, если:
+\[
+t_{\text{near}} < t_{\text{far}} \quad \text{и} \quad t_{\text{far}} > 0
+\]
+
+Параметр пересечения: $t = t_{\text{near}}$ (если $t_{\text{near}} > 0$) или $t = t_{\text{far}}$ (если луч начинается внутри куба).
+
+Нормаль определяется по ближайшей грани:
+
+\[
+\mathbf{n}_i = \begin{cases}
+(1, 0, 0) & \text{если ближайшая грань по } x \\
+(0, 1, 0) & \text{если ближайшая грань по } y \\
+(0, 0, 1) & \text{если ближайшая грань по } z
+\end{cases}
+\]
+
+с соответствующим знаком в зависимости от направления.
+
+\section{Материалы и BRDF}
+
+\subsection{Уравнение рендеринга}
+
+Уравнение рендеринга описывает количество света, исходящего из точки $\mathbf{x}$ в направлении $\omega_o$:
+
+\[
+L_o(\mathbf{x}, \omega_o) = L_e(\mathbf{x}, \omega_o) + \int_{\Omega} f_r(\mathbf{x}, \omega_i, \omega_o) L_i(\mathbf{x}, \omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+\]
+
+где:
+\begin{itemize}
+    \item $L_o$ --- исходящая яркость (outgoing radiance)
+    \item $L_e$ --- эмиссия (emission)
+    \item $f_r$ --- BRDF (Bidirectional Reflectance Distribution Function)
+    \item $L_i$ --- входящая яркость (incoming radiance)
+    \item $\mathbf{n}$ --- нормаль поверхности
+    \item $\Omega$ --- полусфера направлений над поверхностью
+\end{itemize}
+
+\subsection{Lambertian (диффузный) материал}
+
+Lambertian BRDF моделирует идеально рассеивающую поверхность:
+
+\[
+f_r(\omega_i, \omega_o) = \frac{\rho}{\pi}
+\]
+
+где $\rho$ --- альбедо (albedo), цвет материала.
+
+Это означает, что поверхность отражает свет равномерно во все направления, независимо от направления падения и наблюдения.
+
+\subsection{Металлический материал --- GGX распределение}
+
+Для металлических материалов используется микрофасетная модель с распределением нормалей GGX (Trowbridge-Reitz):
+
+\[
+D(\mathbf{h}) = \frac{\alpha^2}{\pi((\mathbf{n} \cdot \mathbf{h})^2(\alpha^2 - 1) + 1)^2}
+\]
+
+где:
+\begin{itemize}
+    \item $\mathbf{h} = \frac{\omega_i + \omega_o}{\|\omega_i + \omega_o\|}$ --- половинный вектор (half vector)
+    \item $\alpha = \text{roughness}^2$ --- параметр шероховатости
+    \item $\mathbf{n}$ --- нормаль поверхности
+\end{itemize}
+
+Для идеального зеркала (mirror) используется простое отражение:
+
+\[
+\omega_o = \text{reflect}(\omega_i, \mathbf{n}) = \omega_i - 2(\omega_i \cdot \mathbf{n})\mathbf{n}
+\]
+
+\subsection{Диэлектрический материал --- закон Снеллиуса и Френель}
+
+Для прозрачных материалов (стекло, вода) используется закон Снеллиуса:
+
+\[
+\eta_1 \sin\theta_1 = \eta_2 \sin\theta_2
+\]
+
+где $\eta_1, \eta_2$ --- показатели преломления сред, $\theta_1, \theta_2$ --- углы падения и преломления.
+
+Вектор преломления вычисляется как:
+
+\begin{align}
+\cos\theta_1 &= -\omega_i \cdot \mathbf{n} \\
+\sin\theta_1 &= \sqrt{1 - \cos^2\theta_1} \\
+\sin\theta_2 &= \frac{\eta_1}{\eta_2} \sin\theta_1
+\end{align}
+
+Если $\sin\theta_2 > 1$, происходит полное внутреннее отражение (TIR), и луч отражается.
+
+Иначе:
+
+\begin{align}
+\cos\theta_2 &= \sqrt{1 - \sin^2\theta_2} \\
+\mathbf{r}_{\perp} &= \eta(\omega_i + \cos\theta_1 \mathbf{n}) \\
+\mathbf{r}_{\parallel} &= -\sqrt{1 - \|\mathbf{r}_{\perp}\|^2} \mathbf{n} \\
+\omega_o &= \mathbf{r}_{\perp} + \mathbf{r}_{\parallel}
+\end{align}
+
+где $\eta = \eta_1 / \eta_2$ (при входе) или $\eta = \eta_2 / \eta_1$ (при выходе).
+
+Коэффициент отражения Френеля (аппроксимация Шлика):
+
+\[
+R(\theta) = R_0 + (1 - R_0)(1 - \cos\theta)^5
+\]
+
+где:
+
+\[
+R_0 = \left(\frac{\eta_2 - \eta_1}{\eta_2 + \eta_1}\right)^2
+\]
+
+Вероятность отражения используется для выбора между отражением и преломлением методом Монте-Карло.
+
+\subsection{Поглощение света (Beer-Lambert закон)}
+
+При прохождении через диэлектрик свет поглощается по закону Бугера-Ламберта:
+
+\[
+I(d) = I_0 \exp(-\sigma d)
+\]
+
+где:
+\begin{itemize}
+    \item $I_0$ --- начальная интенсивность
+    \item $\sigma = \boldsymbol{\alpha} \times \text{absorptionScale}$ --- коэффициент поглощения (вектор для RGB)
+    \item $d$ --- пройденное расстояние
+\end{itemize}
+
+В коде это реализуется как:
+
+\[
+\text{attenuation} = \exp(-\boldsymbol{\alpha} \times \text{scale} \times d)
+\]
+
+\section{Importance Sampling}
+
+\subsection{Cosine-weighted sampling для диффузных материалов}
+
+Для эффективного сэмплирования диффузных материалов используется косинусное распределение:
+
+\[
+p(\omega) = \frac{\cos\theta}{\pi}
+\]
+
+где $\theta$ --- угол между направлением и нормалью.
+
+Сэмплирование в локальной системе координат:
+
+\begin{align}
+\phi &= 2\pi \xi_1 \quad \text{(равномерно по азимуту)} \\
+\cos\theta &= \sqrt{\xi_2} \quad \text{(косинусное распределение)} \\
+\sin\theta &= \sqrt{1 - \xi_2}
+\end{align}
+
+где $\xi_1, \xi_2 \sim \mathcal{U}(0, 1)$.
+
+Направление в локальной системе:
+
+\[
+\mathbf{d}_{\text{local}} = (\sin\theta \cos\phi, \sin\theta \sin\phi, \cos\theta)
+\]
+
+Преобразование в мировую систему через ортонормированный базис $(\mathbf{u}, \mathbf{v}, \mathbf{n})$:
+
+\[
+\mathbf{d}_{\text{world}} = \mathbf{d}_{\text{local},x} \mathbf{u} + \mathbf{d}_{\text{local},y} \mathbf{v} + \mathbf{d}_{\text{local},z} \mathbf{n}
+\]
+
+PDF по направлению:
+
+\[
+p(\omega) = \frac{\cos\theta}{\pi}
+\]
+
+\subsection{GGX importance sampling для металлов}
+
+Для GGX распределения используется importance sampling нормалей микроповерхности:
+
+\begin{align}
+\cos\theta_h &= \sqrt{\frac{1 - \xi_2}{1 + (\alpha^2 - 1)\xi_2}} \\
+\sin\theta_h &= \sqrt{1 - \cos^2\theta_h} \\
+\phi_h &= 2\pi \xi_1
+\end{align}
+
+Половинный вектор в локальной системе:
+
+\[
+\mathbf{h}_{\text{local}} = (\sin\theta_h \cos\phi_h, \sin\theta_h \sin\phi_h, \cos\theta_h)
+\]
+
+Преобразование в мировую систему и вычисление направления отражения:
+
+\[
+\omega_o = \text{reflect}(-\omega_i, \mathbf{h})
+\]
+
+\subsection{Next Event Estimation (NEE)}
+
+Для уменьшения дисперсии используется прямое сэмплирование источников света (Next Event Estimation).
+
+Вклад от источника света:
+
+\[
+L_{\text{direct}} = \frac{f_r(\omega_i, \omega_o) L_e \cos\theta_i \cos\theta_o}{r^2 \cdot p_A}
+\]
+
+где:
+\begin{itemize}
+    \item $L_e$ --- эмиссия источника
+    \item $\cos\theta_i$ --- косинус угла между нормалью поверхности и направлением к источнику
+    \item $\cos\theta_o$ --- косинус угла между нормалью источника и направлением от источника
+    \item $r$ --- расстояние до источника
+    \item $p_A = 1/A$ --- PDF по площади источника (для равномерного сэмплирования)
+\end{itemize}
+
+Переход от PDF по площади к PDF по направлению:
+
+\[
+p(\omega) = \frac{p_A \cos\theta_o}{r^2}
+\]
+
+\subsection{Сэмплирование точки на сфере-источнике}
+
+Для сферического источника света точка сэмплируется равномерно по поверхности:
+
+\begin{align}
+z &= 1 - 2\xi_1 \quad \text{(равномерно по } z \text{)} \\
+r &= \sqrt{1 - z^2} \\
+\phi &= 2\pi \xi_2 \\
+\mathbf{p}_{\text{local}} &= (r\cos\phi, r\sin\phi, z) \\
+\mathbf{p}_{\text{world}} &= \mathbf{c} + R \cdot \frac{\mathbf{p}_{\text{local}}}{\|\mathbf{p}_{\text{local}}\|}
+\end{align}
+
+где $R$ --- радиус сферы, $\mathbf{c}$ --- центр сферы.
+
+PDF по площади:
+
+\[
+p_A = \frac{1}{4\pi R^2}
+\]
+
+\section{Path Tracing алгоритм}
+
+\subsection{Рекурсивное уравнение рендеринга}
+
+Path tracing решает уравнение рендеринга методом Монте-Карло, трассируя случайные пути света:
+
+\[
+L_o(\mathbf{x}, \omega_o) = L_e(\mathbf{x}, \omega_o) + \int_{\Omega} f_r(\mathbf{x}, \omega_i, \omega_o) L_i(\mathbf{x}, \omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+\]
+
+Метод Монте-Карло аппроксимирует интеграл:
+
+\[
+L_o \approx L_e + \frac{1}{N} \sum_{i=1}^{N} \frac{f_r(\omega_i, \omega_o) L_i(\omega_i) (\mathbf{n} \cdot \omega_i)}{p(\omega_i)}
+\]
+
+где $p(\omega_i)$ --- PDF сэмплирования направления.
+
+\subsection{Итеративный алгоритм path tracing}
+
+Вместо рекурсии используется итеративный подход:
+
+\begin{align}
+\text{throughput} &= (1, 1, 1) \quad \text{(начальное значение)} \\
+\text{radiance} &= (0, 0, 0) \\
+\text{depth} &= \text{maxDepth}
+\end{align}
+
+Для каждого отскока:
+
+\begin{align}
+\text{radiance} &\leftarrow \text{radiance} + \text{throughput} \times L_e \quad \text{(если материал эмиссивный)} \\
+\text{radiance} &\leftarrow \text{radiance} + \text{throughput} \times L_{\text{direct}} \quad \text{(NEE)} \\
+\omega_i &\sim p(\omega) \quad \text{(сэмплирование нового направления)} \\
+\text{throughput} &\leftarrow \text{throughput} \times \frac{f_r(\omega_i, \omega_o) (\mathbf{n} \cdot \omega_i)}{p(\omega_i)} \\
+\text{depth} &\leftarrow \text{depth} - 1
+\end{align}
+
+\subsection{Russian Roulette}
+
+Для раннего прекращения трассировки используется Russian Roulette:
+
+\[
+\text{continue} = \begin{cases}
+\text{true} & \text{с вероятностью } p = \min(\max(\text{throughput}), 0.95) \\
+\text{false} & \text{с вероятностью } 1 - p
+\end{cases}
+\]
+
+Если трассировка продолжается, throughput корректируется:
+
+\[
+\text{throughput} \leftarrow \frac{\text{throughput}}{p}
+\]
+
+Это обеспечивает несмещенность оценки (unbiased estimation).
+
+\subsection{Условия прекращения}
+
+Трассировка прекращается, если:
+\begin{itemize}
+    \item $\text{depth} \leq 0$ --- достигнута максимальная глубина
+    \item Луч не пересекает объекты (уходит в небо)
+    \item Russian Roulette решает прекратить трассировку
+    \item $\max(\text{throughput}) < \epsilon$ --- throughput стал слишком мал
+\end{itemize}
+
+\section{Объемное рассеяние (Volumetric Scattering)}
+
+\subsection{Уравнение переноса излучения}
+
+Уравнение переноса излучения описывает изменение яркости вдоль луча в объемной среде:
+
+\[
+\frac{dL(\mathbf{x}, \omega)}{ds} = -\sigma_t(\mathbf{x}) L(\mathbf{x}, \omega) + \sigma_s(\mathbf{x}) \int_{4\pi} p(\omega_i, \omega) L_i(\mathbf{x}, \omega_i) d\omega_i
+\]
+
+где:
+\begin{itemize}
+    \item $\sigma_t = \sigma_s + \sigma_a$ --- коэффициент экстинкции
+    \item $\sigma_s$ --- коэффициент рассеяния
+    \item $\sigma_a$ --- коэффициент поглощения
+    \item $p(\omega_i, \omega)$ --- фазовая функция
+\end{itemize}
+
+\subsection{Фазовая функция Хеньи-Грина}
+
+Фазовая функция Хеньи-Грина (Henyey-Greenstein) моделирует рассеяние в объемной среде:
+
+\[
+p(\cos\theta) = \frac{1 - g^2}{4\pi(1 + g^2 - 2g\cos\theta)^{3/2}}
+\]
+
+где:
+\begin{itemize}
+    \item $g \in [-1, 1]$ --- параметр анизотропии
+    \item $g = 0$ --- изотропное рассеяние
+    \item $g > 0$ --- рассеяние вперед (forward scattering)
+    \item $g < 0$ --- рассеяние назад (backward scattering)
+\end{itemize}
+
+\subsection{Single Scattering интеграл}
+
+Для single scattering (однократное рассеяние) интеграл упрощается. Вклад от источника света в точке $\mathbf{x}$:
+
+\[
+L_s(\mathbf{x}, \omega) = \int_0^d T(\mathbf{x}, \mathbf{x} + s\omega) \sigma_s(\mathbf{x} + s\omega) \int_{4\pi} p(\omega_i, \omega) L_e(\mathbf{x} + s\omega, \omega_i) d\omega_i ds
+\]
+
+где $T$ --- функция пропускания (transmittance):
+
+\[
+T(\mathbf{a}, \mathbf{b}) = \exp\left(-\int_0^{\|\mathbf{b} - \mathbf{a}\|} \sigma_t(\mathbf{a} + t\frac{\mathbf{b} - \mathbf{a}}{\|\mathbf{b} - \mathbf{a}\|}) dt\right)
+\]
+
+Для однородной среды:
+
+\[
+T(d) = \exp(-\sigma_t d)
+\]
+
+\subsection{Численное интегрирование}
+
+Интеграл аппроксимируется методом прямоугольников:
+
+\[
+L_s \approx \sum_{i=0}^{N-1} T(s_i) \sigma_s(\mathbf{x}_i) p(\omega_i, \omega) L_e(\mathbf{x}_i, \omega_i) \Delta s
+\]
+
+где:
+\begin{itemize}
+    \item $s_i = (i + 0.5)\Delta s$ --- позиция сэмпла
+    \item $\Delta s = d/N$ --- шаг интегрирования
+    \item $\mathbf{x}_i = \mathbf{x} + s_i \omega$ --- позиция сэмпла
+    \item $N$ --- количество шагов (обычно 24)
+\end{itemize}
+
+\subsection{Beer-Lambert закон для поглощения}
+
+При прохождении через среду свет ослабляется по закону Бугера-Ламберта:
+
+\[
+L(d) = L_0 \exp(-\sigma_a d)
+\]
+
+где $d$ --- пройденное расстояние.
+
+Для неоднородной среды:
+
+\[
+L(d) = L_0 \exp\left(-\int_0^d \sigma_a(\mathbf{x} + t\omega) dt\right)
+\]
+
+\section{Накопление и усреднение сэмплов}
+
+\subsection{Накопление сэмплов}
+
+Для каждого пикселя накапливается сумма всех сэмплов:
+
+\[
+\text{accum}[i] = \sum_{s=1}^{N} L_s(i)
+\]
+
+где:
+\begin{itemize}
+    \item $i = y \times W + x$ --- линейный индекс пикселя
+    \item $L_s(i)$ --- яркость $s$-го сэмпла для пикселя $i$
+    \item $N$ --- общее количество сэмплов
+\end{itemize}
+
+В коде это реализуется как:
+
+\begin{align}
+\text{accumData}[i \times 3 + 0] &\leftarrow \text{accumData}[i \times 3 + 0] + L_s(i).r \\
+\text{accumData}[i \times 3 + 1] &\leftarrow \text{accumData}[i \times 3 + 1] + L_s(i).g \\
+\text{accumData}[i \times 3 + 2] &\leftarrow \text{accumData}[i \times 3 + 2] + L_s(i).b
+\end{align}
+
+\subsection{Усреднение}
+
+Итоговый цвет пикселя вычисляется как среднее арифметическое:
+
+\[
+\bar{L}(i) = \frac{1}{N} \sum_{s=1}^{N} L_s(i) = \frac{\text{accum}[i]}{N}
+\]
+
+где $N = \text{sampleCount}$ --- текущее количество накопленных сэмплов.
+
+Компоненты цвета:
+
+\begin{align}
+\bar{L}_r(i) &= \frac{\text{accumData}[i \times 3 + 0]}{N} \\
+\bar{L}_g(i) &= \frac{\text{accumData}[i \times 3 + 1]}{N} \\
+\bar{L}_b(i) &= \frac{\text{accumData}[i \times 3 + 2]}{N}
+\end{align}
+
+\subsection{Запись в текстуру}
+
+Итоговый цвет записывается в текстуру формата RGBA16F (16-битное число с плавающей точкой на канал):
+
+\[
+\text{imageStore}(\text{destTex}, \text{pix}, (\bar{L}_r, \bar{L}_g, \bar{L}_b, 1.0))
+\]
+
+Формат RGBA16F позволяет хранить значения вне диапазона [0, 1], что важно для HDR (High Dynamic Range) рендеринга.
+
+\section{Оптимизации}
+
+\subsection{Кэширование вычислений}
+
+Для ускорения вычислений используются оптимизации:
+
+\subsubsection{Быстрая нормализация}
+
+Вместо стандартной нормализации используется оптимизированная версия:
+
+\[
+\mathbf{v}_{\text{norm}} = \mathbf{v} \times \text{inversesqrt}(\|\mathbf{v}\|^2)
+\]
+
+где $\text{inversesqrt}$ --- быстрая инструкция GPU для вычисления $1/\sqrt{x}$.
+
+\subsubsection{Кэширование квадратов}
+
+Часто используемые квадраты вычисляются один раз:
+
+\[
+r^2 = r \times r, \quad \alpha^2 = \alpha \times \alpha
+\]
+
+\subsubsection{Кэширование обратных значений}
+
+Обратные значения вычисляются один раз:
+
+\[
+\text{invA} = \frac{1}{a}, \quad \text{invRadius} = \frac{1}{r}
+\]
+
+\subsection{Ранний выход из циклов}
+
+Для оптимизации используются ранние выходы:
+
+\begin{itemize}
+    \item Если луч не пересекает объект, цикл прерывается
+    \item Если throughput стал слишком мал, трассировка прекращается
+    \item Если материал эмиссивный, трассировка прекращается после добавления эмиссии
+\end{itemize}
+
+\subsection{Оптимизация доступа к памяти}
+
+\begin{itemize}
+    \item Последовательный доступ к массивам объектов и материалов
+    \item Кэширование часто используемых значений в регистрах
+    \item Минимизация количества обращений к глобальной памяти
+\end{itemize}
+
+\subsection{Firefly Reduction}
+
+Для уменьшения артефактов (fireflies) от очень ярких сэмплов используется ограничение яркости:
+
+\[
+L_{\text{clamped}} = \begin{cases}
+L & \text{если } \text{luminance}(L) \leq L_{\max} \\
+L \times \frac{L_{\max}}{\text{luminance}(L)} & \text{иначе}
+\end{cases}
+\]
+
+где:
+
+\[
+\text{luminance}(L) = 0.2126 \times L_r + 0.7152 \times L_g + 0.0722 \times L_b
+\]
+
+и $L_{\max} = 500.0$ --- максимальная допустимая яркость.
+
+\section{Заключение}
+
+В данном документе представлено полное математическое обоснование работы патрейсера на видеокарте. Описаны:
+
+\begin{itemize}
+    \item Форматы данных и их передача на GPU через UBO и SSBO
+    \item Механизм распараллеливания через compute shaders
+    \item Математические формулы для генерации лучей и пересечений
+    \item BRDF для различных типов материалов
+    \item Алгоритмы importance sampling
+    \item Path tracing с Russian Roulette
+    \item Объемное рассеяние света
+    \item Накопление и усреднение сэмплов
+    \item Оптимизации для повышения производительности
+\end{itemize}
+
+Все формулы выведены из физических принципов и соответствуют реализации в коде.
+
+\end{document}
+

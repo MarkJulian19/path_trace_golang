@@ -1,0 +1,595 @@
+{
+  "name": "RTX Showcase - Silver & Copper Walls with Colored Lights",
+  "camera": {
+    "position": {
+      "x": 0,
+      "y": 3.5,
+      "z": 8
+    },
+    "target": {
+      "x": 0,
+      "y": 2.5,
+      "z": 0
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 50,
+    "aperture": 0.05,
+    "focus_dist": 8,
+    "aspect_ratio": 1.7777778
+  },
+  "objects": [
+    {
+      "id": "ground-plane",
+      "type": "plane",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "ground-polished"
+    },
+    {
+      "id": "back-wall",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 4,
+        "z": -6
+      },
+      "size": {
+        "x": 14,
+        "y": 8,
+        "z": 0.3
+      },
+      "material_id": "wall-back-dark"
+    },
+    {
+      "id": "left-wall-silver",
+      "type": "box",
+      "position": {
+        "x": -7,
+        "y": 4,
+        "z": 0
+      },
+      "size": {
+        "x": 0.3,
+        "y": 8,
+        "z": 12
+      },
+      "material_id": "metal-silver-smooth"
+    },
+    {
+      "id": "right-wall-copper",
+      "type": "box",
+      "position": {
+        "x": 7,
+        "y": 4,
+        "z": 0
+      },
+      "size": {
+        "x": 0.3,
+        "y": 8,
+        "z": 12
+      },
+      "material_id": "metal-copper-smooth"
+    },
+    {
+      "id": "divider-wall",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 3.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.15,
+        "y": 7,
+        "z": 10
+      },
+      "material_id": "wall-divider"
+    },
+    {
+      "id": "glass-cube-center-left",
+      "type": "box",
+      "position": {
+        "x": -1.5,
+        "y": 1.0,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0.8,
+        "z": 0.8
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "glass-cube-center-right",
+      "type": "box",
+      "position": {
+        "x": 1.5,
+        "y": 1.0,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0.8,
+        "z": 0.8
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "metal-cube-silver",
+      "type": "box",
+      "position": {
+        "x": -3.5,
+        "y": 0.8,
+        "z": -3.5
+      },
+      "size": {
+        "x": 0.6,
+        "y": 0.6,
+        "z": 0.6
+      },
+      "material_id": "metal-silver-smooth"
+    },
+    {
+      "id": "metal-cube-copper",
+      "type": "box",
+      "position": {
+        "x": 3.5,
+        "y": 0.8,
+        "z": -3.5
+      },
+      "size": {
+        "x": 0.6,
+        "y": 0.6,
+        "z": 0.6
+      },
+      "material_id": "metal-copper-smooth"
+    },
+    {
+      "id": "ceiling",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 8,
+        "z": 0
+      },
+      "size": {
+        "x": 14,
+        "y": 0.3,
+        "z": 12
+      },
+      "material_id": "ceiling-dark"
+    },
+    {
+      "id": "light-red",
+      "type": "sphere_light",
+      "position": {
+        "x": -3.5,
+        "y": 6.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-red-bright"
+    },
+    {
+      "id": "light-blue",
+      "type": "sphere_light",
+      "position": {
+        "x": 3.5,
+        "y": 6.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-blue-bright"
+    },
+    {
+      "id": "glass-sphere-left",
+      "type": "sphere",
+      "position": {
+        "x": -3.5,
+        "y": 1.5,
+        "z": -2.5
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "glass-sphere-right",
+      "type": "sphere",
+      "position": {
+        "x": 3.5,
+        "y": 1.5,
+        "z": -2.5
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "glass-cube-left",
+      "type": "box",
+      "position": {
+        "x": -3.5,
+        "y": 1.0,
+        "z": 2.5
+      },
+      "size": {
+        "x": 1.5,
+        "y": 1.5,
+        "z": 1.5
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "glass-cube-right",
+      "type": "box",
+      "position": {
+        "x": 3.5,
+        "y": 1.0,
+        "z": 2.5
+      },
+      "size": {
+        "x": 1.5,
+        "y": 1.5,
+        "z": 1.5
+      },
+      "material_id": "glass-clear"
+    },
+    {
+      "id": "mirror-sphere-left",
+      "type": "sphere",
+      "position": {
+        "x": -3.5,
+        "y": 1.5,
+        "z": 2.5
+      },
+      "size": {
+        "x": 1.0,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "mirror-perfect"
+    },
+    {
+      "id": "mirror-sphere-right",
+      "type": "sphere",
+      "position": {
+        "x": 3.5,
+        "y": 1.5,
+        "z": 2.5
+      },
+      "size": {
+        "x": 1.0,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "mirror-perfect"
+    },
+    {
+      "id": "metal-sphere-silver",
+      "type": "sphere",
+      "position": {
+        "x": -3.5,
+        "y": 3.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.6,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-silver-smooth"
+    },
+    {
+      "id": "metal-sphere-copper",
+      "type": "sphere",
+      "position": {
+        "x": 3.5,
+        "y": 3.5,
+        "z": 0
+      },
+      "size": {
+        "x": 0.6,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-copper-smooth"
+    }
+  ],
+  "materials": [
+    {
+      "id": "ground-polished",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.3,
+        "g": 0.3,
+        "b": 0.35
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-back-dark",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.15,
+        "g": 0.15,
+        "b": 0.2
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-divider",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.2,
+        "g": 0.2,
+        "b": 0.25
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "ceiling-dark",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.1,
+        "g": 0.1,
+        "b": 0.15
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-silver-smooth",
+      "type": "metal",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.95,
+        "b": 0.98
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 1.0,
+      "reflectivity": 1.0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-copper-smooth",
+      "type": "metal",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.65,
+        "b": 0.45
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 1.0,
+      "reflectivity": 1.0,
+      "tint": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "glass-clear",
+      "type": "dielectric",
+      "albedo": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "rough": 0,
+      "ior": 1.5,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0.01,
+        "g": 0.01,
+        "b": 0.01
+      },
+      "smoothness": 0,
+      "reflectivity": 0,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "absorption_scale": 0.01
+    },
+    {
+      "id": "mirror-perfect",
+      "type": "mirror",
+      "albedo": {
+        "r": 0.9,
+        "g": 0.9,
+        "b": 0.95
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-red-bright",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 12.0,
+        "g": 2.0,
+        "b": 2.0
+      },
+      "power": 1.0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-blue-bright",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 2.0,
+        "g": 3.0,
+        "b": 12.0
+      },
+      "power": 1.0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    }
+  ],
+  "settings": {
+    "width": 400,
+    "height": 200,
+    "samples_per_px": 1,
+    "max_depth": 20
+  },
+  "sky": {
+    "type": "solid",
+    "color": {
+      "r": 1,
+      "g": 1,
+      "b": 1
+    },
+    "horizon": {
+      "r": 1,
+      "g": 1,
+      "b": 1
+    },
+    "zenith": {
+      "r": 1,
+      "g": 1,
+      "b": 1
+    }
+  }
+}
+
