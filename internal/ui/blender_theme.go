@@ -62,4 +62,3 @@ func (t *blenderDarkTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 func (t *blenderDarkTheme) Size(name fyne.ThemeSizeName) float32 {
 	return theme.DefaultTheme().Size(name)
 }
-

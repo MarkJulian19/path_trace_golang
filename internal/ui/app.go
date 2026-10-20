@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,9 +19,9 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/user/pathtracer/internal/engine"
-	"github.com/user/pathtracer/internal/engine/gpu"
-	"github.com/user/pathtracer/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/engine"
+	"github.com/MarkJulian19/path_trace_golang/internal/engine/gpu"
+	"github.com/MarkJulian19/path_trace_golang/internal/scene"
 )
 
 // logFilter фильтрует некритичные ошибки GLFW из логов
@@ -48,10 +49,20 @@ func Run(scenePath, mode string) error {
 	log.SetOutput(&logFilter{original: originalLogWriter})
 	defer log.SetOutput(originalLogWriter)
 
-	a := app.New()
+	// LANG=C не парсится Fyne (language: tag is not well-formed).
+	if v := os.Getenv("LANG"); v == "" || v == "C" {
+		_ = os.Setenv("LANG", "en_US.UTF-8")
+	}
+
+	a := app.NewWithID("com.markjulian19.pathtracer")
 	// Применяем темную тему в стиле Blender
 	a.Settings().SetTheme(newBlenderDarkTheme())
 	w := a.NewWindow("Go Path Tracer")
+
+	// Все вызовы Fyne API из фоновых горутин — только через uiDo (модель fyne.Do с v2.6+).
+	uiDo := func(fn func()) {
+		fyne.Do(fn)
+	}
 
 	sc, err := scene.Load(scenePath)
 	if err != nil {
@@ -95,6 +106,29 @@ func Run(scenePath, mode string) error {
 
 	imgCanvas := canvas.NewImageFromImage(img)
 	imgCanvas.FillMode = canvas.ImageFillContain
+	var mu sync.Mutex
+	// displayImg — снимок для UI: копируется на render-потоке до fyne.Do,
+	// чтобы Refresh не гонялся с записью в img.Pix на GPU/CPU.
+	var displayImg *image.RGBA
+	publishPreview := func() {
+		mu.Lock()
+		src := img
+		if src == nil {
+			mu.Unlock()
+			return
+		}
+		b := src.Bounds()
+		if displayImg == nil || displayImg.Bounds() != b {
+			displayImg = image.NewRGBA(b)
+		}
+		copy(displayImg.Pix, src.Pix)
+		snap := displayImg
+		mu.Unlock()
+		uiDo(func() {
+			imgCanvas.Image = snap
+			imgCanvas.Refresh()
+		})
+	}
 	// Отображаемое окно предпросмотра ограничиваем разумным максимумом,
 	// чтобы большое логическое разрешение (2560x1440 и выше) не ломало UI.
 	setCanvasSize := func() {
@@ -189,7 +223,8 @@ func Run(scenePath, mode string) error {
 			focusDist = math.Sqrt(
 				math.Pow(sc.Camera.Position.X-sc.Camera.Target.X, 2) +
 					math.Pow(sc.Camera.Position.Y-sc.Camera.Target.Y, 2) +
-					math.Pow(sc.Camera.Position.Z-sc.Camera.Target.Z, 2))
+					math.Pow(sc.Camera.Position.Z-sc.Camera.Target.Z, 2),
+			)
 		}
 
 		// Упрощенный подход: перемещаем объект в плоскости камеры
@@ -264,7 +299,6 @@ func Run(scenePath, mode string) error {
 		startRender(false)
 	})
 
-	var mu sync.Mutex
 	var stopCh chan struct{}
 	var renderTimer *time.Timer             // для debounce при быстрых изменениях
 	var lastFinalImage image.Image          // последнее отрендеренное финальное изображение
@@ -273,8 +307,11 @@ func Run(scenePath, mode string) error {
 	// Настройка FPS для wireframe стримминга
 	wireframeFPS := 60.0
 
-	liveUpdate := widget.NewCheck("Live update while rendering", func(bool) {})
+	liveUpdate := widget.NewCheck("Live update while rendering", func(b bool) {
+		gpu.SetLivePreview(b)
+	})
 	liveUpdate.SetChecked(true)
+	gpu.SetLivePreview(true)
 
 	camControlActive := false
 	camControlCheck := widget.NewCheck("WASDQE camera control (preview)", func(b bool) {
@@ -307,20 +344,21 @@ func Run(scenePath, mode string) error {
 			// Для wireframe режима используем стримминг вместо покадрового рендеринга
 			if isWireframe && !final {
 				// Стримминг режим для wireframe
-				status.SetText("Streaming wireframe...")
-			cfg := engine.RenderConfig{
-				Width:        previewSettings.Width,
-				Height:       previewSettings.Height,
-				SamplesPerPx: 1, // Для wireframe достаточно 1 сэмпла
-				MaxDepth:     1, // Минимальная глубина для wireframe
-				MaxRayDist:   float32(previewSettings.MaxRayDist),
-			}
+				uiDo(func() { status.SetText("Streaming wireframe...") })
+				cfg := engine.RenderConfig{
+					Width:        previewSettings.Width,
+					Height:       previewSettings.Height,
+					SamplesPerPx: 1, // Для wireframe достаточно 1 сэмпла
+					MaxDepth:     1, // Минимальная глубина для wireframe
+					MaxRayDist:   float32(previewSettings.MaxRayDist),
+				}
 
 				// Переинициализируем основной буфер, если логическое разрешение изменилось
 				mu.Lock()
+				needCanvasBind := false
 				if img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
 					img = image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
-					imgCanvas.Image = img
+					needCanvasBind = true
 					// Инициализируем темным серым (фон wireframe)
 					for y := 0; y < cfg.Height; y++ {
 						for x := 0; x < cfg.Width; x++ {
@@ -328,7 +366,11 @@ func Run(scenePath, mode string) error {
 						}
 					}
 				}
+				bindImg := img
 				mu.Unlock()
+				if needCanvasBind {
+					uiDo(func() { imgCanvas.Image = bindImg })
+				}
 
 				// Вычисляем интервал между кадрами
 				mu.Lock()
@@ -342,13 +384,13 @@ func Run(scenePath, mode string) error {
 				for {
 					select {
 					case <-stopCh:
-						status.SetText("Streaming stopped")
+						uiDo(func() { status.SetText("Streaming stopped") })
 						return
 					case <-ticker.C:
 						// Проверяем, не был ли рендер отменён
 						select {
 						case <-stopCh:
-							status.SetText("Streaming stopped")
+							uiDo(func() { status.SetText("Streaming stopped") })
 							return
 						default:
 						}
@@ -365,7 +407,7 @@ func Run(scenePath, mode string) error {
 
 						// Если режим изменился, выходим из стримминга
 						if !currentIsWireframe {
-							status.SetText("Mode changed, stopping stream")
+							uiDo(func() { status.SetText("Mode changed, stopping stream") })
 							return
 						}
 
@@ -374,19 +416,13 @@ func Run(scenePath, mode string) error {
 						}
 
 						// Рендерим напрямую в основной буфер
-						// Важно: получаем ссылку на изображение под блокировкой
 						mu.Lock()
-						renderImg := img // Сохраняем ссылку на изображение
+						renderImg := img
 						mu.Unlock()
 
-						// Рендерим без блокировки мьютекса - это позволяет другим операциям работать
 						engine.RenderInto(sc, cfg, renderImg, progress)
 
-						// Обновляем UI безопасно - Refresh() потокобезопасен в Fyne
-						// но нужно убедиться, что img не изменяется во время обновления
-						mu.Lock()
-						imgCanvas.Refresh()
-						mu.Unlock()
+						publishPreview()
 
 						// Обновляем FPS если изменился
 						mu.Lock()
@@ -403,7 +439,7 @@ func Run(scenePath, mode string) error {
 			}
 
 			// Обычный покадровый рендеринг для normal режима или final рендеринга
-			status.SetText("Rendering...")
+			uiDo(func() { status.SetText("Rendering...") })
 			startTime := time.Now()
 			var cfg engine.RenderConfig
 			if final {
@@ -426,13 +462,12 @@ func Run(scenePath, mode string) error {
 
 			// переинициализируем буфер, если логическое разрешение изменилось
 			mu.Lock()
+			needCanvasBind := false
 			if img.Bounds().Dx() != cfg.Width || img.Bounds().Dy() != cfg.Height {
 				img = image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
-				imgCanvas.Image = img
+				needCanvasBind = true
 			}
 			// Для wireframe режима не очищаем изображение, чтобы избежать мерцания
-			// Для normal режима очищаем перед новым рендером
-			// Проверяем режим рендеринга
 			shouldClearImage := true
 			if engine.GetBackend() == engine.BackendGPU {
 				if gpu.GetRenderMode() == 1 {
@@ -444,35 +479,38 @@ func Run(scenePath, mode string) error {
 				}
 			}
 			if shouldClearImage {
-				// очистить изображение перед новым рендером только для normal режима
 				for y := 0; y < cfg.Height; y++ {
 					for x := 0; x < cfg.Width; x++ {
 						img.Set(x, y, color.RGBA{0, 0, 0, 255})
 					}
 				}
 			}
+			bindImg := img
 			mu.Unlock()
+			if needCanvasBind {
+				uiDo(func() { imgCanvas.Image = bindImg })
+			}
 
-			// Инициализируем прогресс-бар
 			totalSamples := cfg.SamplesPerPx
 			if totalSamples < 1 {
 				totalSamples = 1
 			}
 
-			renderProgressBar.SetValue(0)
-			renderProgressBar.Show()
-			renderTimeLabel.SetText("Render time: 0.00s")
+			uiDo(func() {
+				renderProgressBar.SetValue(0)
+				renderProgressBar.Show()
+				renderTimeLabel.SetText("Render time: 0.00s")
+			})
 
 			var progress func(currentSample, totalSamples int)
 			lastProgressUpdate := time.Now()
-			const minProgressUpdateInterval = 100 * time.Millisecond // Минимальный интервал между обновлениями UI
+			const minProgressUpdateInterval = 100 * time.Millisecond
+			live := liveUpdate.Checked
 
-			if liveUpdate.Checked {
+			if live {
 				progress = func(currentSample, totalSamples int) {
-					// проверяем, не был ли рендер отменён
 					select {
 					case <-stopCh:
-						// Устанавливаем флаг отмены для GPU рендерера
 						if engine.GetBackend() == engine.BackendGPU {
 							gpu.SetRenderCancel(true)
 						}
@@ -480,7 +518,6 @@ func Run(scenePath, mode string) error {
 					default:
 					}
 
-					// Обновляем прогресс-бар и время
 					if totalSamples < 1 {
 						totalSamples = 1
 					}
@@ -488,37 +525,35 @@ func Run(scenePath, mode string) error {
 						currentSample = totalSamples
 					}
 					progressValue := float64(currentSample) / float64(totalSamples)
-					renderProgressBar.SetValue(progressValue)
-
 					elapsed := time.Since(startTime).Seconds()
-					renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
+					timeText := fmt.Sprintf("Render time: %.2fs", elapsed)
 
-					// Адаптивный интервал обновления изображения в зависимости от размера
-					// Для больших разрешений обновляем чаще, чтобы UI не зависал
 					pixelCount := cfg.Width * cfg.Height
 					updateInterval := minProgressUpdateInterval
 					if pixelCount > 2000*2000 {
-						// Очень большие разрешения - обновляем чаще (каждые 50ms)
 						updateInterval = 50 * time.Millisecond
 					} else if pixelCount > 1000*1000 {
-						// Большие разрешения - обновляем каждые 75ms
 						updateInterval = 75 * time.Millisecond
 					}
 
-					// Обновляем изображение с адаптивной частотой
 					now := time.Now()
-					if now.Sub(lastProgressUpdate) >= updateInterval || currentSample == totalSamples {
-						imgCanvas.Refresh()
+					refreshImg := now.Sub(lastProgressUpdate) >= updateInterval || currentSample == totalSamples
+					if refreshImg {
 						lastProgressUpdate = now
+					}
+
+					uiDo(func() {
+						renderProgressBar.SetValue(progressValue)
+						renderTimeLabel.SetText(timeText)
+					})
+					if refreshImg {
+						publishPreview()
 					}
 				}
 			} else {
-				// Даже если live update выключен, обновляем прогресс
 				progress = func(currentSample, totalSamples int) {
-					// Проверяем отмену
 					select {
 					case <-stopCh:
-						// Устанавливаем флаг отмены для GPU рендерера
 						if engine.GetBackend() == engine.BackendGPU {
 							gpu.SetRenderCancel(true)
 						}
@@ -533,31 +568,33 @@ func Run(scenePath, mode string) error {
 						currentSample = totalSamples
 					}
 					progressValue := float64(currentSample) / float64(totalSamples)
-					renderProgressBar.SetValue(progressValue)
-
 					elapsed := time.Since(startTime).Seconds()
-					renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
+					timeText := fmt.Sprintf("Render time: %.2fs", elapsed)
 
-					// Для больших разрешений обновляем изображение даже если live update выключен
-					// чтобы предотвратить зависание UI
 					pixelCount := cfg.Width * cfg.Height
+					refreshImg := false
 					if pixelCount > 2000*2000 {
-						// Очень большие разрешения - обновляем каждые 200ms даже без live update
 						now := time.Now()
 						if now.Sub(lastProgressUpdate) >= 200*time.Millisecond || currentSample == totalSamples {
-							imgCanvas.Refresh()
+							refreshImg = true
 							lastProgressUpdate = now
 						}
+					}
+
+					uiDo(func() {
+						renderProgressBar.SetValue(progressValue)
+						renderTimeLabel.SetText(timeText)
+					})
+					if refreshImg {
+						publishPreview()
 					}
 				}
 			}
 
-			// Перед запуском рендера обновляем настройки GPU-денойзинга и сглаживания,
-			// чтобы изменения из UI сразу применялись.
 			if engine.GetBackend() == engine.BackendGPU {
 				gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
 				gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
-				// Сбрасываем флаг отмены перед началом нового рендеринга
+				gpu.SetLivePreview(live)
 				gpu.SetRenderCancel(false)
 			}
 
@@ -569,29 +606,27 @@ func Run(scenePath, mode string) error {
 			default:
 			}
 
-			if !liveUpdate.Checked {
-				imgCanvas.Refresh()
+			if !live {
+				publishPreview()
 			}
 
-			// Если это финальный рендер, сохраняем копию изображения для быстрого сохранения
 			if final {
 				mu.Lock()
-				// Создаём копию изображения
 				bounds := img.Bounds()
-				lastFinalImage = image.NewRGBA(bounds)
-				for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-					for x := bounds.Min.X; x < bounds.Max.X; x++ {
-						lastFinalImage.(*image.RGBA).Set(x, y, img.At(x, y))
-					}
-				}
+				cloned := image.NewRGBA(bounds)
+				copy(cloned.Pix, img.Pix)
+				lastFinalImage = cloned
 				lastFinalConfig = cfg
 				mu.Unlock()
 			}
 
 			elapsed := time.Since(startTime).Seconds()
-			renderProgressBar.SetValue(1.0)
-			renderTimeLabel.SetText(fmt.Sprintf("Render time: %.2fs", elapsed))
-			status.SetText("Done")
+			doneText := fmt.Sprintf("Render time: %.2fs", elapsed)
+			uiDo(func() {
+				renderProgressBar.SetValue(1.0)
+				renderTimeLabel.SetText(doneText)
+				status.SetText("Done")
+			})
 			log.Println("render finished")
 		}()
 	}
@@ -680,7 +715,8 @@ func Run(scenePath, mode string) error {
 		dist := math.Sqrt(
 			math.Pow(cam.Position.X-cam.Target.X, 2) +
 				math.Pow(cam.Position.Y-cam.Target.Y, 2) +
-				math.Pow(cam.Position.Z-cam.Target.Z, 2))
+				math.Pow(cam.Position.Z-cam.Target.Z, 2),
+		)
 		camFocusDist.SetText(fmt.Sprintf("%.2f", dist))
 	} else {
 		camFocusDist.SetText(fmt.Sprintf("%.2f", cam.FocusDist))
@@ -717,7 +753,8 @@ func Run(scenePath, mode string) error {
 
 	cameraBox := container.NewVBox(
 		widget.NewLabel("Camera"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Pos X"), camPosX,
 			widget.NewLabel("Pos Y"), camPosY,
 			widget.NewLabel("Pos Z"), camPosZ,
@@ -849,90 +886,95 @@ func Run(scenePath, mode string) error {
 		// Start video generation in goroutine
 		go func() {
 			mu.Lock()
-			// Save reference to imgCanvas for preview updates
 			previewCanvas := imgCanvas
 			previewImg := img
 			mu.Unlock()
 
-			// Update status
-			status.SetText("Rendering video frames...")
-			renderProgressBar.SetValue(0)
-			renderProgressBar.Show()
+			uiDo(func() {
+				status.SetText("Rendering video frames...")
+				renderProgressBar.SetValue(0)
+				renderProgressBar.Show()
+			})
 
-			// Progress function with preview updates
 			lastPreviewUpdate := time.Now()
 			const minPreviewUpdateInterval = 100 * time.Millisecond
 
 			progress := func(currentFrame, totalFrames int, frameImg image.Image) {
-				// Update progress bar
 				progressValue := float64(currentFrame) / float64(totalFrames)
-				renderProgressBar.SetValue(progressValue)
-				renderTimeLabel.SetText(fmt.Sprintf("Frame %d/%d", currentFrame, totalFrames))
+				timeText := fmt.Sprintf("Frame %d/%d", currentFrame, totalFrames)
 
-				// Update preview window with current frame (throttled)
 				now := time.Now()
-				if now.Sub(lastPreviewUpdate) >= minPreviewUpdateInterval || currentFrame == totalFrames {
+				doPreview := now.Sub(lastPreviewUpdate) >= minPreviewUpdateInterval || currentFrame == totalFrames
+				if doPreview {
 					mu.Lock()
-					// Resize previewImg if needed
 					bounds := frameImg.Bounds()
 					if previewImg.Bounds().Dx() != bounds.Dx() || previewImg.Bounds().Dy() != bounds.Dy() {
 						previewImg = image.NewRGBA(bounds)
 					}
-
-					// Copy frame to preview image
 					for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 						for x := bounds.Min.X; x < bounds.Max.X; x++ {
 							previewImg.Set(x, y, frameImg.At(x, y))
 						}
 					}
-
-					previewCanvas.Image = previewImg
+					snap := previewImg
 					mu.Unlock()
-
-					// Update canvas - Refresh() is thread-safe in Fyne v2
-					previewCanvas.Refresh()
-
 					lastPreviewUpdate = now
+
+					uiDo(func() {
+						renderProgressBar.SetValue(progressValue)
+						renderTimeLabel.SetText(timeText)
+						previewCanvas.Image = snap
+						previewCanvas.Refresh()
+					})
+					return
 				}
+
+				uiDo(func() {
+					renderProgressBar.SetValue(progressValue)
+					renderTimeLabel.SetText(timeText)
+				})
 			}
 
-			// Render video sequence
 			frames, err := engine.RenderVideoSequence(
 				sc, startCam, endCam, duration, fps, cfg, progress,
 			)
-
 			if err != nil {
-				status.SetText(fmt.Sprintf("Video render error: %v", err))
+				msg := fmt.Sprintf("Video render error: %v", err)
+				uiDo(func() { status.SetText(msg) })
 				return
 			}
 
-			// Update status
-			status.SetText("Creating video file...")
+			uiDo(func() { status.SetText("Creating video file...") })
 
-			// Progress function for video creation
 			videoProgress := func(currentFrame, totalFrames int) {
 				progressValue := float64(currentFrame) / float64(totalFrames)
-				renderProgressBar.SetValue(progressValue)
-				renderTimeLabel.SetText(fmt.Sprintf("Encoding frame %d/%d", currentFrame, totalFrames))
+				timeText := fmt.Sprintf("Encoding frame %d/%d", currentFrame, totalFrames)
+				uiDo(func() {
+					renderProgressBar.SetValue(progressValue)
+					renderTimeLabel.SetText(timeText)
+				})
 			}
 
-			// Create video
 			err = engine.CreateVideoFromFrames(frames, outputPath, float64(fps), videoProgress)
-
 			if err != nil {
-				status.SetText(fmt.Sprintf("Video creation error: %v", err))
+				msg := fmt.Sprintf("Video creation error: %v", err)
+				uiDo(func() { status.SetText(msg) })
 				return
 			}
 
-			renderProgressBar.SetValue(1.0)
-			status.SetText(fmt.Sprintf("Video saved to %s", outputPath))
+			doneMsg := fmt.Sprintf("Video saved to %s", outputPath)
+			uiDo(func() {
+				renderProgressBar.SetValue(1.0)
+				status.SetText(doneMsg)
+			})
 		}()
 	})
 
 	videoBox := container.NewVBox(
 		widget.NewLabel("Video Generation"),
 		widget.NewLabel("Start Camera"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Start Pos X"), startPosX,
 			widget.NewLabel("Start Pos Y"), startPosY,
 			widget.NewLabel("Start Pos Z"), startPosZ,
@@ -941,7 +983,8 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Start Target Z"), startTargetZ,
 		),
 		widget.NewLabel("End Camera"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("End Pos X"), endPosX,
 			widget.NewLabel("End Pos Y"), endPosY,
 			widget.NewLabel("End Pos Z"), endPosZ,
@@ -949,7 +992,8 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("End Target Y"), endTargetY,
 			widget.NewLabel("End Target Z"), endTargetZ,
 		),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Duration (s)"), durationEntry,
 			widget.NewLabel("FPS"), fpsEntry,
 			widget.NewLabel("Output Path"), videoOutputPath,
@@ -1213,7 +1257,8 @@ func Run(scenePath, mode string) error {
 
 	materialForm := container.NewVBox(
 		widget.NewLabel("Selected material"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Type"), matTypeSelect,
 			widget.NewLabel("Albedo R"), albR,
 			widget.NewLabel("Albedo G"), albG,
@@ -1404,11 +1449,13 @@ func Run(scenePath, mode string) error {
 
 	objectForm := container.NewVBox(
 		widget.NewLabel("Selected object"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Type"), objTypeSelect,
 			widget.NewLabel("Material"), objMatSelect,
 		),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Pos X"), objPosX,
 			widget.NewLabel("Pos Y"), objPosY,
 			widget.NewLabel("Pos Z"), objPosZ,
@@ -1604,7 +1651,7 @@ func Run(scenePath, mode string) error {
 			}
 			return v
 		}
-		
+
 		// Парсим максимальную длину луча
 		previewSettings.MaxRayDist = parseF(prevMaxRayDist, previewSettings.MaxRayDist)
 		finalSettings.MaxRayDist = parseF(finalMaxRayDist, finalSettings.MaxRayDist)
@@ -1707,7 +1754,8 @@ func Run(scenePath, mode string) error {
 	settingsBox := container.NewVBox(
 		widget.NewLabel("Render settings"),
 		widget.NewLabel("Preview"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Width"), prevW,
 			widget.NewLabel("Height"), prevH,
 			widget.NewLabel("Samples"), prevSpp,
@@ -1715,12 +1763,14 @@ func Run(scenePath, mode string) error {
 			widget.NewLabel("Max ray distance"), prevMaxRayDist,
 		),
 		widget.NewLabel("Preview display (on screen)"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Disp W"), dispW,
 			widget.NewLabel("Disp H"), dispH,
 		),
 		widget.NewLabel("Final"),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Width"), finalW,
 			widget.NewLabel("Height"), finalH,
 			widget.NewLabel("Samples"), finalSpp,
@@ -1729,14 +1779,16 @@ func Run(scenePath, mode string) error {
 		),
 		widget.NewLabel("Fog (GPU)"),
 		fogEnabledCheck,
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Density"), fogDensityEntry,
 			widget.NewLabel("Scatter"), fogScatterEntry,
 			widget.NewLabel("Color R"), fogColorREntry,
 			widget.NewLabel("Color G"), fogColorGEntry,
 			widget.NewLabel("Color B"), fogColorBEntry,
 		),
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Sigma S"), fogSigmaSEntry,
 			widget.NewLabel("Sigma A"), fogSigmaAEntry,
 			widget.NewLabel("g (anisotropy)"), fogGEntry,
@@ -1780,13 +1832,15 @@ func Run(scenePath, mode string) error {
 		}
 
 		// Сохраняем уже отрендеренное изображение без перерендеринга
-		status.SetText("Saving image...")
+		uiDo(func() { status.SetText("Saving image...") })
 		go func() {
 			if err := engine.SavePNG(path, savedImg); err != nil {
-				status.SetText(fmt.Sprintf("Save image error: %v", err))
+				msg := fmt.Sprintf("Save image error: %v", err)
+				uiDo(func() { status.SetText(msg) })
 			} else {
-				status.SetText(fmt.Sprintf("Image saved to %s (%dx%d, %d samples)",
-					path, savedCfg.Width, savedCfg.Height, savedCfg.SamplesPerPx))
+				msg := fmt.Sprintf("Image saved to %s (%dx%d, %d samples)",
+					path, savedCfg.Width, savedCfg.Height, savedCfg.SamplesPerPx)
+				uiDo(func() { status.SetText(msg) })
 			}
 		}()
 	})
@@ -1825,7 +1879,8 @@ func Run(scenePath, mode string) error {
 	denoiseBox := container.NewVBox(
 		widget.NewLabel("GPU denoise"),
 		denoiseCheck,
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Sigma S (space)"), denoiseSigmaSEntry,
 			widget.NewLabel("Sigma R (color)"), denoiseSigmaREntry,
 		),
@@ -1886,7 +1941,8 @@ func Run(scenePath, mode string) error {
 	smoothBox := container.NewVBox(
 		widget.NewLabel("GPU extra smoothing"),
 		smoothCheck,
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Radius (1-5)"), smoothRadiusEntry,
 			widget.NewLabel("Strength (0-1)"), smoothStrengthEntry,
 		),
@@ -1959,7 +2015,8 @@ func Run(scenePath, mode string) error {
 		videoBox,
 		denoiseBox,
 		smoothBox,
-		container.NewGridWithColumns(2,
+		container.NewGridWithColumns(
+			2,
 			widget.NewLabel("Scene / Image path"), outputPath,
 		),
 		container.NewHBox(saveBtn, saveImageBtn),

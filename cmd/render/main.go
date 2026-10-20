@@ -6,9 +6,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/user/pathtracer/internal/engine"
-	"github.com/user/pathtracer/internal/scene"
-	"github.com/user/pathtracer/internal/ui"
+	"github.com/MarkJulian19/path_trace_golang/internal/engine"
+	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/ui"
 )
 
 func main() {

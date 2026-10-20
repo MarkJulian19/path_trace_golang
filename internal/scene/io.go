@@ -38,4 +38,3 @@ func Save(path string, sc *Scene) error {
 }
 
 // (Rendering helpers moved to engine package to avoid import cycle)
-

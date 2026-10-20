@@ -21,25 +21,25 @@ type Color struct {
 
 // Camera describes the viewpoint for the renderer.
 type Camera struct {
-	Position Vec3   `json:"position"`
-	Target   Vec3   `json:"target"`
-	Up       Vec3   `json:"up"`
-	FOV      float64`json:"fov"`
+	Position Vec3    `json:"position"`
+	Target   Vec3    `json:"target"`
+	Up       Vec3    `json:"up"`
+	FOV      float64 `json:"fov"`
 
-	Aperture   float64 `json:"aperture"`
-	FocusDist  float64 `json:"focus_dist"`
-	AspectRatio float64`json:"aspect_ratio"`
+	Aperture    float64 `json:"aperture"`
+	FocusDist   float64 `json:"focus_dist"`
+	AspectRatio float64 `json:"aspect_ratio"`
 }
 
 // MaterialType enumerates supported material kinds.
 type MaterialType string
 
 const (
-	MaterialLambert   MaterialType = "lambert"
-	MaterialMetal     MaterialType = "metal"
+	MaterialLambert    MaterialType = "lambert"
+	MaterialMetal      MaterialType = "metal"
 	MaterialDielectric MaterialType = "dielectric"
-	MaterialEmissive  MaterialType = "emissive"
-	MaterialMirror    MaterialType = "mirror"
+	MaterialEmissive   MaterialType = "emissive"
+	MaterialMirror     MaterialType = "mirror"
 )
 
 // Material describes surface properties.
@@ -51,19 +51,19 @@ type Material struct {
 	Rough  float64 `json:"rough"` // for metal and lambert (roughness), deprecated for metals (use Smoothness)
 	IOR    float64 `json:"ior"`   // for dielectric
 
-	Emit Color   `json:"emit"`  // emissive color
-	Power float64`json:"power"` // emissive intensity multiplier
-	
+	Emit  Color   `json:"emit"`  // emissive color
+	Power float64 `json:"power"` // emissive intensity multiplier
+
 	// Absorption for dielectric materials (color tinting through glass)
 	// Higher values mean more absorption (darker color)
 	Absorption Color `json:"absorption"` // for dielectric (default: 0,0,0 = no absorption)
-	
+
 	// Advanced parameters for metals
-	Smoothness  float64 `json:"smoothness"`  // for metals: 0.0 = matte, 1.0 = perfect mirror (default: 1.0)
+	Smoothness   float64 `json:"smoothness"`   // for metals: 0.0 = matte, 1.0 = perfect mirror (default: 1.0)
 	Reflectivity float64 `json:"reflectivity"` // for metals: 0.0-1.0, controls reflection intensity (default: 1.0)
-	
+
 	// Advanced parameters for dielectrics (glass)
-	Tint Color `json:"tint"` // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
+	Tint            Color   `json:"tint"`             // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
 	AbsorptionScale float64 `json:"absorption_scale"` // for dielectric: scale factor for absorption coefficient (default: 0.01, units are in cm)
 }
 
@@ -71,15 +71,15 @@ type Material struct {
 type ObjectType string
 
 const (
-	ObjectSphere     ObjectType = "sphere"
-	ObjectPlane      ObjectType = "plane"
-	ObjectBox        ObjectType = "box"
+	ObjectSphere      ObjectType = "sphere"
+	ObjectPlane       ObjectType = "plane"
+	ObjectBox         ObjectType = "box"
 	ObjectSphereLight ObjectType = "sphere_light"
 )
 
 // Object is a single entity in the scene.
 type Object struct {
-	ID string     `json:"id"`
+	ID   string     `json:"id"`
 	Type ObjectType `json:"type"`
 
 	Position Vec3 `json:"position"`
@@ -137,19 +137,19 @@ type Fog struct {
 
 // Sky describes sky/environment settings.
 type Sky struct {
-	Type      string  `json:"type"`      // "solid" or "gradient"
-	Color     Color   `json:"color"`     // for solid type
-	Horizon   Color   `json:"horizon"`   // for gradient type
-	Zenith    Color   `json:"zenith"`    // for gradient type
+	Type    string `json:"type"`    // "solid" or "gradient"
+	Color   Color  `json:"color"`   // for solid type
+	Horizon Color  `json:"horizon"` // for gradient type
+	Zenith  Color  `json:"zenith"`  // for gradient type
 }
 
 // Scene holds everything needed to render an image.
 type Scene struct {
-	Name      string          `json:"name"`
-	Camera    Camera          `json:"camera"`
-	Objects   []Object        `json:"objects"`
-	Materials []Material      `json:"materials"`
-	Settings  RenderSettings  `json:"settings"`
+	Name      string         `json:"name"`
+	Camera    Camera         `json:"camera"`
+	Objects   []Object       `json:"objects"`
+	Materials []Material     `json:"materials"`
+	Settings  RenderSettings `json:"settings"`
 
 	Background Color `json:"background"` // deprecated, use Sky instead
 	Sky        *Sky  `json:"sky"`        // new sky system
@@ -194,5 +194,3 @@ func pow(x, y float64) float64 {
 	}
 	return x
 }
-
-

@@ -1,0 +1,23 @@
+# Binaries
+/bin/
+.codegraph/
+/pathtracer
+fyne-cross/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local outputs
+/output.png
+/ui_render*.png
+
+# Archives / junk
+*.rar
+*.zip
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

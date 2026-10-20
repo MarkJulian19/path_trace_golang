@@ -11,11 +11,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/go-gl/gl/v3.3-core/gl"
-	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/go-gl/glfw/v3.4/glfw"
 
-	"github.com/user/pathtracer/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/scene"
 )
 
 // acesTonemap применяет простую аппроксимацию ACES-фильма к одному
@@ -269,6 +270,19 @@ func GetSelectedObject() int {
 	return selectedObject
 }
 
+// programLocs кэширует GetUniformLocation для compute-программы.
+type programLocs struct {
+	prog              uint32
+	locW              int32
+	locH              int32
+	locSpp            int32
+	locDepth          int32
+	locMaxRayDist     int32
+	locSeed           int32
+	locSampleCount    int32
+	locSelectedObject int32
+}
+
 // gpuRenderer owns a hidden GLFW window and GL resources used for compute rendering.
 type gpuRenderer struct {
 	initOnce         sync.Once
@@ -291,9 +305,9 @@ type gpuRenderer struct {
 	fogUBO           uint32
 	width            int
 	height           int
-	// accum содержит накопленные значения цвета в диапазоне [0,1] для каждого пикселя (R,G,B).
-	// Используется только для чтения финального результата, накопление происходит на GPU.
-	accum []float32
+	// readTmp — переиспользуемый CPU-буфер для PBO→float readback (RGBA).
+	readTmp []float32
+	locs    programLocs
 }
 
 // RenderConfig is a minimal copy of engine.RenderConfig to avoid import cycles.
@@ -320,6 +334,113 @@ const (
 	OBJ_PLANE  = 1
 	OBJ_BOX    = 2
 )
+
+// cacheUniforms обновляет кэш GetUniformLocation при смене программы.
+func (r *gpuRenderer) cacheUniforms(prog uint32) {
+	if r.locs.prog == prog {
+		return
+	}
+	r.locs = programLocs{
+		prog:              prog,
+		locW:              gl.GetUniformLocation(prog, gl.Str("uWidth\x00")),
+		locH:              gl.GetUniformLocation(prog, gl.Str("uHeight\x00")),
+		locSpp:            gl.GetUniformLocation(prog, gl.Str("uSamplesPerPx\x00")),
+		locDepth:          gl.GetUniformLocation(prog, gl.Str("uMaxDepth\x00")),
+		locMaxRayDist:     gl.GetUniformLocation(prog, gl.Str("uMaxRayDist\x00")),
+		locSeed:           gl.GetUniformLocation(prog, gl.Str("uFrameSeed\x00")),
+		locSampleCount:    gl.GetUniformLocation(prog, gl.Str("uSampleCount\x00")),
+		locSelectedObject: gl.GetUniformLocation(prog, gl.Str("uSelectedObject\x00")),
+	}
+}
+
+// clearSSBOFloats заполняет SSBO нулями на GPU без загрузки гигантского CPU-слайса.
+func clearSSBOFloats(ssbo uint32, floatCount int) {
+	if floatCount <= 0 {
+		return
+	}
+	gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, ssbo)
+	zero := float32(0)
+	gl.ClearBufferData(gl.SHADER_STORAGE_BUFFER, gl.R32F, gl.RED, gl.FLOAT, unsafe.Pointer(&zero))
+	gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+}
+
+// ensureReadTmp возвращает переиспользуемый буфер RGBA float для readback.
+func (r *gpuRenderer) ensureReadTmp(pixelCount int) []float32 {
+	need := pixelCount * 4
+	if cap(r.readTmp) < need {
+		r.readTmp = make([]float32, need)
+	} else {
+		r.readTmp = r.readTmp[:need]
+	}
+	return r.readTmp
+}
+
+// tonemapHDRToRGBA пишет ACES+gamma в dst из линейного RGBA float tmp.
+func tonemapHDRToRGBA(dst []uint8, tmp []float32, pixelCount int) {
+	maxPixels := len(dst) / 4
+	n := pixelCount
+	if maxPixels < n {
+		n = maxPixels
+	}
+	for i := 0; i < n; i++ {
+		off := i * 4
+		if off+3 >= len(dst) || off+3 >= len(tmp) {
+			break
+		}
+		rLin := tmp[off]
+		gLin := tmp[off+1]
+		bLin := tmp[off+2]
+		if math.IsNaN(float64(rLin)) || math.IsInf(float64(rLin), 0) {
+			rLin = 0
+		}
+		if math.IsNaN(float64(gLin)) || math.IsInf(float64(gLin), 0) {
+			gLin = 0
+		}
+		if math.IsNaN(float64(bLin)) || math.IsInf(float64(bLin), 0) {
+			bLin = 0
+		}
+		if rLin < 0 {
+			rLin = 0
+		}
+		if gLin < 0 {
+			gLin = 0
+		}
+		if bLin < 0 {
+			bLin = 0
+		}
+		rTm := acesTonemap(rLin)
+		gTm := acesTonemap(gLin)
+		bTm := acesTonemap(bLin)
+		rGamma := float32(math.Sqrt(float64(rTm)))
+		gGamma := float32(math.Sqrt(float64(gTm)))
+		bGamma := float32(math.Sqrt(float64(bTm)))
+		if rGamma > 1 {
+			rGamma = 1
+		}
+		if gGamma > 1 {
+			gGamma = 1
+		}
+		if bGamma > 1 {
+			bGamma = 1
+		}
+		dst[off] = uint8(rGamma*255.0 + 0.5)
+		dst[off+1] = uint8(gGamma*255.0 + 0.5)
+		dst[off+2] = uint8(bGamma*255.0 + 0.5)
+		dst[off+3] = 255
+	}
+}
+
+// copyFrameToPrev копирует текущий HDR-кадр в prevFrameTexture для temporal blend.
+func (r *gpuRenderer) copyFrameToPrev(w, h int) {
+	if r.prevFrameTexture == 0 || w <= 0 || h <= 0 {
+		return
+	}
+	gl.CopyImageSubData(
+		r.imgTexture, gl.TEXTURE_2D, 0, 0, 0, 0,
+		r.prevFrameTexture, gl.TEXTURE_2D, 0, 0, 0, 0,
+		int32(w), int32(h), 1,
+	)
+}
 
 // renderRequest is sent from callers to the dedicated GL worker goroutine.
 type renderRequest struct {
@@ -360,6 +481,11 @@ func renderWorker() {
 	}
 
 	fmt.Fprintf(os.Stderr, "GPU renderer initialized successfully\n")
+	if IsSoftwareGL() {
+		fmt.Fprintf(os.Stderr, "WARNING: %s — OpenGL compute is software (CPU). Discrete GPU will not show load.\n", glRenderer)
+	}
+	gpuLogf("GL worker ready (debug=%v live_readback=%v temporal=%v softGL=%v)",
+		gpuDebugEnabled(), LivePreviewEnabled(), TemporalEnabled(), IsSoftwareGL())
 
 	for req := range renderCh {
 		err := renderer.renderOnce(req.sc, req.cfg, req.img, req.progress)
@@ -395,6 +521,11 @@ func (r *gpuRenderer) initGL() error {
 			r.initErr = fmt.Errorf("gl init: %w", err)
 			return
 		}
+
+		vendor := gl.GoStr(gl.GetString(gl.VENDOR))
+		rendererStr := gl.GoStr(gl.GetString(gl.RENDERER))
+		version := gl.GoStr(gl.GetString(gl.VERSION))
+		setGLInfo(vendor, rendererStr, version)
 
 		// Create textures/buffers; resized on first use.
 		gl.GenTextures(1, &r.imgTexture)
@@ -2644,6 +2775,9 @@ func compileShader(src string, shaderType uint32) (uint32, error) {
 // renderOnce executes a very simple GPU render into img using the already
 // initialized GL context owned by the worker goroutine.
 func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) error {
+	totalT := startGPUTimer("renderOnce")
+	defer totalT.stopf("%dx%d spp=%d live=%v", cfg.Width, cfg.Height, cfg.SamplesPerPx, LivePreviewEnabled())
+
 	// --- Инициализация накопительного буфера ---
 	pixelCount := cfg.Width * cfg.Height
 	if pixelCount <= 0 {
@@ -2654,20 +2788,13 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	expectedPixSize := pixelCount * 4 // RGBA = 4 байта на пиксель
 	if len(img.Pix) != expectedPixSize {
 		// Изображение имеет неправильный размер - ограничиваем pixelCount размером изображения для безопасности
-		// Ограничиваем pixelCount размером изображения
 		actualPixSize := len(img.Pix) / 4
 		if actualPixSize < pixelCount {
 			pixelCount = actualPixSize
 		}
 	}
 
-	if len(r.accum) != pixelCount*3 {
-		r.accum = make([]float32, pixelCount*3)
-	} else {
-		for i := range r.accum {
-			r.accum[i] = 0
-		}
-	}
+	gpuLogf("begin mats=%d objs=%d", len(sc.Materials), len(sc.Objects))
 
 	// --- Пакуем материалы ---
 	matCount := len(sc.Materials)
@@ -3010,22 +3137,19 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		accumSize := pixelCount * 3 * 4 // 3 компоненты (RGB) по 4 байта (float32)
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.accumSSBO)
 		gl.BufferData(gl.SHADER_STORAGE_BUFFER, accumSize, nil, gl.DYNAMIC_DRAW)
-		// Инициализируем нулями
-		zeroData := make([]float32, pixelCount*3)
-		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+		clearSSBOFloats(r.accumSSBO, pixelCount*3)
 
 		// Инициализируем variance buffer на GPU (9 float32 на пиксель: [mean, M2, count] × 3 канала)
 		varianceSize := pixelCount * 9 * 4 // 9 значений по 4 байта (float32)
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.varianceSSBO)
 		gl.BufferData(gl.SHADER_STORAGE_BUFFER, varianceSize, nil, gl.DYNAMIC_DRAW)
-		// Инициализируем нулями
-		varianceZeroData := make([]float32, pixelCount*9)
-		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(varianceZeroData)*4, gl.Ptr(varianceZeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+		clearSSBOFloats(r.varianceSSBO, pixelCount*9)
 
 		// Убеждаемся, что все операции завершены перед началом нового рендеринга
 		gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
+		gpuLogf("resized GPU buffers to %dx%d (accum=%dB variance=%dB)", cfg.Width, cfg.Height, accumSize, varianceSize)
 	}
 
 	// Загружаем материалы/объекты/камеру/небо
@@ -3086,15 +3210,16 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 8, r.varianceSSBO)
 	}
 
-	// Set uniforms.
-	locW := gl.GetUniformLocation(currentProgram, gl.Str("uWidth\x00"))
-	locH := gl.GetUniformLocation(currentProgram, gl.Str("uHeight\x00"))
-	locSpp := gl.GetUniformLocation(currentProgram, gl.Str("uSamplesPerPx\x00"))
-	locDepth := gl.GetUniformLocation(currentProgram, gl.Str("uMaxDepth\x00"))
-	locMaxRayDist := gl.GetUniformLocation(currentProgram, gl.Str("uMaxRayDist\x00"))
-	locSeed := gl.GetUniformLocation(currentProgram, gl.Str("uFrameSeed\x00"))
-	locSampleCount := gl.GetUniformLocation(currentProgram, gl.Str("uSampleCount\x00"))
-	locSelectedObject := gl.GetUniformLocation(currentProgram, gl.Str("uSelectedObject\x00"))
+	// Set uniforms (locations кэшируются на программу).
+	r.cacheUniforms(currentProgram)
+	locW := r.locs.locW
+	locH := r.locs.locH
+	locSpp := r.locs.locSpp
+	locDepth := r.locs.locDepth
+	locMaxRayDist := r.locs.locMaxRayDist
+	locSeed := r.locs.locSeed
+	locSampleCount := r.locs.locSampleCount
+	locSelectedObject := r.locs.locSelectedObject
 
 	gl.Uniform1i(locW, int32(cfg.Width))
 	gl.Uniform1i(locH, int32(cfg.Height))
@@ -3110,21 +3235,17 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	// Инициализируем накопительный буфер нулями при начале нового рендера
 	// Для wireframe накопительный буфер не используется, поэтому не очищаем его
 	if !isWireframe && r.width == cfg.Width && r.height == cfg.Height {
-		// Размер не изменился - просто очищаем существующий буфер
+		clearT := startGPUTimer("clear_ssbo")
 		accumSize := pixelCount * 3 * 4
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.accumSSBO)
-		// Проверяем, что буфер существует и правильного размера
 		var bufSize int32
 		gl.GetBufferParameteriv(gl.SHADER_STORAGE_BUFFER, gl.BUFFER_SIZE, &bufSize)
 		if int(bufSize) != accumSize {
-			// Пересоздаем буфер нужного размера
 			gl.BufferData(gl.SHADER_STORAGE_BUFFER, accumSize, nil, gl.DYNAMIC_DRAW)
 		}
-		zeroData := make([]float32, pixelCount*3)
-		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(zeroData)*4, gl.Ptr(zeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+		clearSSBOFloats(r.accumSSBO, pixelCount*3)
 
-		// Очищаем variance buffer при начале нового рендера
 		varianceSize := pixelCount * 9 * 4
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, r.varianceSSBO)
 		var varianceBufSize int32
@@ -3132,13 +3253,13 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 		if int(varianceBufSize) != varianceSize {
 			gl.BufferData(gl.SHADER_STORAGE_BUFFER, varianceSize, nil, gl.DYNAMIC_DRAW)
 		}
-		varianceZeroData := make([]float32, pixelCount*9)
-		gl.BufferSubData(gl.SHADER_STORAGE_BUFFER, 0, len(varianceZeroData)*4, gl.Ptr(varianceZeroData))
 		gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+		clearSSBOFloats(r.varianceSSBO, pixelCount*9)
+		clearT.stop()
 	}
 
-	// Временный буфер для чтения данных с GPU (RGBA16F -> float32)
-	tmp := make([]float32, pixelCount*4)
+	// Временный буфер для чтения данных с GPU (RGBA16F -> float32), переиспользуется
+	tmp := r.ensureReadTmp(pixelCount)
 
 	// Для wireframe режима семплов быть не должно - рендерим один кадр
 	// Для path tracing используем семплы
@@ -3169,156 +3290,113 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 	// Сбрасываем флаг отмены перед началом рендеринга
 	SetRenderCancel(false)
 
+	wantLiveReadback := (LivePreviewEnabled() && progress != nil) || isWireframe
+	lastSampleHadReadback := false
+	dispatchTotal := time.Duration(0)
+	readbackTotal := time.Duration(0)
+	readbackCount := 0
+
+	gpuLogf("sample loop passes=%d updateInterval=%d live_readback=%v", passes, updateInterval, wantLiveReadback)
+
 	for s := 0; s < passes; s++ {
-		// Проверяем флаг отмены перед каждым сэмплом
 		if IsRenderCancelled() {
+			gpuLogf("cancelled before sample %d/%d", s, passes)
 			break
 		}
 
-		// Вызываем progress callback перед каждым сэмплом для обновления UI
-		// Это позволяет UI обработать события и предотвратить зависание
-		if progress != nil {
-			progress(s, passes)
-		}
-
-		// Проверяем отмену еще раз после вызова progress
-		if IsRenderCancelled() {
-			break
-		}
-
-		// Для wireframe режима семплы не используются - рендерим один кадр
-		// Для path tracing используем семплы
 		if !isWireframe {
 			gl.Uniform1i(locSpp, 1)
-			gl.Uniform1i(locSampleCount, int32(s+1)) // Количество накопленных сэмплов
+			gl.Uniform1i(locSampleCount, int32(s+1))
 			gl.Uniform1ui(locSeed, uint32(time.Now().UnixNano())+uint32(s))
 		} else {
-			// Для wireframe устанавливаем минимальные значения
 			gl.Uniform1i(locSpp, 1)
 			gl.Uniform1i(locSampleCount, 1)
 			gl.Uniform1ui(locSeed, uint32(time.Now().UnixNano()))
 		}
-		gl.Uniform1i(locSelectedObject, int32(GetSelectedObject())) // Выбранный объект
+		gl.Uniform1i(locSelectedObject, int32(GetSelectedObject()))
 
-		// Запуск compute shader с оптимизированными размерами групп
-		// Размеры групп должны совпадать с layout(local_size_x = 32, local_size_y = 32) в шейдере
+		dispStart := time.Now()
 		groupsX := (cfg.Width + 31) / 32
 		groupsY := (cfg.Height + 31) / 32
 		gl.DispatchCompute(uint32(groupsX), uint32(groupsY), 1)
-
-		// Минимальная синхронизация - только то, что необходимо для следующей операции
-		// Не блокируем GPU лишними барьерами - это позволяет GPU работать параллельно
 		gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+		if gpuDebugEnabled() {
+			dispatchTotal += time.Since(dispStart)
+		}
 
-		// Для wireframe обновляем всегда (один кадр)
-		// Для path tracing используем адаптивный интервал обновления
-		shouldUpdate := isWireframe || (s+1)%updateInterval == 0 || (s+1) == passes
+		// Mid-render readback только для live UI / wireframe; иначе — один финальный.
+		isLast := (s + 1) == passes
+		shouldUpdate := isWireframe || (wantLiveReadback && ((s+1)%updateInterval == 0 || isLast))
 
 		if shouldUpdate {
+			rbStart := time.Now()
 			if isWireframe {
-				// Для wireframe используем PBO для надежного чтения
-				// Сначала синхронизируем, чтобы убедиться, что шейдер завершил работу
 				gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT)
-
-				// Используем основной PBO для wireframe
 				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, r.pbo)
 				gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
 				gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
-
-				// Синхронизируем перед чтением из PBO
 				gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
-
-				// Читаем данные из PBO
 				ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
 				if ptr != nil {
-					// Проверяем размер перед копированием
-					expectedLen := len(tmp)
-					src := ((*[1 << 28]float32)(ptr))[:expectedLen]
+					src := (*[1 << 28]float32)(ptr)[:len(tmp)]
 					copy(tmp, src)
 					gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 				} else {
-					// Если не удалось прочитать, заполняем темно-серым чтобы избежать белого экрана
 					for i := 0; i < len(tmp); i += 4 {
 						if i+3 < len(tmp) {
-							tmp[i] = 0.1   // R
-							tmp[i+1] = 0.1 // G
-							tmp[i+2] = 0.1 // B
-							tmp[i+3] = 1.0 // A
+							tmp[i], tmp[i+1], tmp[i+2], tmp[i+3] = 0.1, 0.1, 0.1, 1.0
 						}
 					}
 				}
 				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 			} else {
-				// Для path tracing используем двойной PBO для асинхронного чтения
-				// Выбираем текущий PBO для записи нового кадра
 				currentPBO := r.pbo
 				if r.pboIndex == 1 {
 					currentPBO = r.pboBack
 				}
-
-				// Читаем данные из предыдущего PBO (если это не первый кадр)
 				if s > 0 {
 					readPBO := r.pboBack
 					if r.pboIndex == 1 {
 						readPBO = r.pbo
 					}
-
-					// Пытаемся прочитать данные из предыдущего PBO асинхронно
 					gl.BindBuffer(gl.PIXEL_PACK_BUFFER, readPBO)
 					ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
 					if ptr != nil {
-						// Данные готовы - копируем
-						src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
+						src := (*[1 << 28]float32)(ptr)[:len(tmp)]
 						copy(tmp, src)
 						gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 					}
 				}
-
-				// Начинаем чтение текущего кадра в текущий PBO (асинхронно)
 				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, currentPBO)
 				gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
 				gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
-
-				// Для последнего кадра ждем завершения и читаем синхронно
-				if (s + 1) == passes {
+				if isLast {
 					gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
 					ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
 					if ptr != nil {
-						src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
+						src := (*[1 << 28]float32)(ptr)[:len(tmp)]
 						copy(tmp, src)
 						gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
 					}
 				}
-
-				// Переключаем PBO для следующего кадра
 				r.pboIndex = 1 - r.pboIndex
 				gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
 			}
 
-			// Обрабатываем данные из текстуры
 			dst := img.Pix
-			// Безопасная проверка размера перед циклом
 			maxPixels := len(dst) / 4
 			actualPixelCount := pixelCount
 			if maxPixels < pixelCount {
-				// Изображение меньше ожидаемого - ограничиваем цикл
 				actualPixelCount = maxPixels
 			}
 
 			if isWireframe {
-				// Для wireframe шейдер уже выдает финальный цвет в диапазоне [0,1]
-				// Просто конвертируем в uint8 без тон-маппинга и гамма-коррекции
 				for i := 0; i < actualPixelCount; i++ {
 					off := i * 4
 					if off+3 >= len(dst) || off+3 >= len(tmp) {
-						break // Защита от выхода за границы
+						break
 					}
-					rVal := tmp[off]
-					gVal := tmp[off+1]
-					bVal := tmp[off+2]
-					// Игнорируем альфа-канал из текстуры, используем только RGB
-
-					// Ограничиваем и конвертируем в uint8
+					rVal, gVal, bVal := tmp[off], tmp[off+1], tmp[off+2]
 					if rVal < 0 {
 						rVal = 0
 					} else if rVal > 1 {
@@ -3334,193 +3412,96 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 					} else if bVal > 1 {
 						bVal = 1
 					}
-
-					// Конвертируем в uint8 с правильным округлением
 					dst[off] = uint8(rVal*255.0 + 0.5)
 					dst[off+1] = uint8(gVal*255.0 + 0.5)
 					dst[off+2] = uint8(bVal*255.0 + 0.5)
-					dst[off+3] = 255 // Альфа всегда непрозрачная
-				}
-			} else {
-				// Для path tracing применяем тон-маппинг и гамма-коррекцию
-				for i := 0; i < actualPixelCount; i++ {
-					off := i * 4
-					if off+3 >= len(dst) || off+3 >= len(tmp) {
-						break // Защита от выхода за границы
-					}
-					rLin := tmp[off]
-					gLin := tmp[off+1]
-					bLin := tmp[off+2]
-
-					// Ограничиваем линейный цвет
-					if rLin < 0 {
-						rLin = 0
-					}
-					if gLin < 0 {
-						gLin = 0
-					}
-					if bLin < 0 {
-						bLin = 0
-					}
-
-					// ACES-подобный тон-маппинг из HDR в [0,1]
-					rTm := acesTonemap(rLin)
-					gTm := acesTonemap(gLin)
-					bTm := acesTonemap(bLin)
-
-					// Гамма-коррекция (переход в sRGB, gamma ~2.0 как в CPU-рендере)
-					rGamma := float32(math.Sqrt(float64(rTm)))
-					gGamma := float32(math.Sqrt(float64(gTm)))
-					bGamma := float32(math.Sqrt(float64(bTm)))
-					if rGamma > 1 {
-						rGamma = 1
-					}
-					if gGamma > 1 {
-						gGamma = 1
-					}
-					if bGamma > 1 {
-						bGamma = 1
-					}
-
-					dst[off] = uint8(rGamma*255.0 + 0.5)
-					dst[off+1] = uint8(gGamma*255.0 + 0.5)
-					dst[off+2] = uint8(bGamma*255.0 + 0.5)
 					dst[off+3] = 255
 				}
+			} else {
+				tonemapHDRToRGBA(dst, tmp, actualPixelCount)
+			}
+			lastSampleHadReadback = isLast || !wantLiveReadback
+			if isLast {
+				lastSampleHadReadback = true
+			}
+			if gpuDebugEnabled() {
+				readbackTotal += time.Since(rbStart)
+				readbackCount++
 			}
 		}
 
-		// Копируем текущий кадр в prevFrameTexture для Temporal Accumulation
-		// Делаем это после обновления изображения, чтобы следующий сэмпл мог использовать предыдущий кадр
-		// Примечание: для OpenGL 3.3 используем простое копирование через чтение/запись
-		// В production можно использовать compute shader для более эффективного копирования
-		if shouldUpdate && !isWireframe && r.prevFrameTexture != 0 && s > 0 {
-			// Для первого кадра prevFrameTexture уже инициализирован нулями
-			// Копирование происходит неявно через использование предыдущего значения в шейдере
-			// В следующих версиях можно добавить compute shader для эффективного копирования
+		// Temporal: копирование HDR-кадра (на softGL отключено — иначе CPU копирует 1080p каждый сэмпл).
+		if !isWireframe && r.prevFrameTexture != 0 && TemporalEnabled() {
+			r.copyFrameToPrev(cfg.Width, cfg.Height)
 		}
 
-		// Всегда обновляем прогресс после каждого сэмпла
-		// Это критично для больших разрешений, чтобы UI не зависал
 		if progress != nil {
 			progress(s+1, passes)
 		}
-
-		// Проверяем отмену после каждого сэмпла
 		if IsRenderCancelled() {
+			gpuLogf("cancelled after sample %d/%d", s+1, passes)
 			break
 		}
 	}
 
-	// Финальная обработка: денойзинг и сглаживание только в конце
-	// Читаем финальный результат с GPU
-	// Используем MemoryBarrier вместо Finish для лучшей производительности
-	gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT | gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
-
-	// Используем текущий PBO
-	currentPBO := r.pbo
-	if r.pboIndex == 1 {
-		currentPBO = r.pboBack
+	if gpuDebugEnabled() {
+		gpuLogf("dispatch_total=%s readbacks=%d readback_total=%s",
+			dispatchTotal.Round(time.Microsecond), readbackCount, readbackTotal.Round(time.Microsecond))
 	}
 
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, currentPBO)
-	gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
-	gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
-
-	// Синхронизируем перед чтением из PBO
-	gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
-
-	ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
-	dst := img.Pix
-	if ptr != nil {
-		tmp := make([]float32, pixelCount*4)
-		// Инициализируем нулями для предотвращения остаточных значений
-		for i := range tmp {
-			tmp[i] = 0.0
-		}
-		src := ((*[1 << 28]float32)(ptr))[:len(tmp)]
-		copy(tmp, src)
-		gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
-
-		// Убеждаемся, что все значения в tmp валидны (не NaN, не Inf)
-		// Это предотвращает появление белой пленки из-за некорректных значений
-		for i := 0; i < len(tmp); i++ {
-			val := tmp[i]
-			if math.IsNaN(float64(val)) || math.IsInf(float64(val), 0) {
-				tmp[i] = 0.0
-			}
-		}
-
-		// Обрабатываем финальные данные
-		// Безопасная проверка размера перед циклом
-		maxPixels := len(dst) / 4
-		actualPixelCount := pixelCount
-		if maxPixels < pixelCount {
-			// Изображение меньше ожидаемого - ограничиваем цикл
-			actualPixelCount = maxPixels
-		}
-		for i := 0; i < actualPixelCount; i++ {
-			off := i * 4
-			if off+3 >= len(dst) || off+3 >= len(tmp) {
-				break // Защита от выхода за границы
-			}
-			rLin := tmp[off]
-			gLin := tmp[off+1]
-			bLin := tmp[off+2]
-
-			// Проверяем на NaN и Inf перед обработкой (предотвращает белесую пленку)
-			if math.IsNaN(float64(rLin)) || math.IsInf(float64(rLin), 0) {
-				rLin = 0
-			}
-			if math.IsNaN(float64(gLin)) || math.IsInf(float64(gLin), 0) {
-				gLin = 0
-			}
-			if math.IsNaN(float64(bLin)) || math.IsInf(float64(bLin), 0) {
-				bLin = 0
-			}
-
-			// Ограничиваем линейный цвет
-			if rLin < 0 {
-				rLin = 0
-			}
-			if gLin < 0 {
-				gLin = 0
-			}
-			if bLin < 0 {
-				bLin = 0
-			}
-
-			// ACES-подобный тон-маппинг из HDR в [0,1]
-			rTm := acesTonemap(rLin)
-			gTm := acesTonemap(gLin)
-			bTm := acesTonemap(bLin)
-
-			// Гамма-коррекция (переход в sRGB, gamma ~2.0 как в CPU-рендере)
-			rGamma := float32(math.Sqrt(float64(rTm)))
-			gGamma := float32(math.Sqrt(float64(gTm)))
-			bGamma := float32(math.Sqrt(float64(bTm)))
-			if rGamma > 1 {
-				rGamma = 1
-			}
-			if gGamma > 1 {
-				gGamma = 1
-			}
-			if bGamma > 1 {
-				bGamma = 1
-			}
-
-			dst[off] = uint8(rGamma*255.0 + 0.5)
-			dst[off+1] = uint8(gGamma*255.0 + 0.5)
-			dst[off+2] = uint8(bGamma*255.0 + 0.5)
-			dst[off+3] = 255
-		}
+	// Финальный readback только если mid-loop его ещё не сделал на последнем сэмпле.
+	needFinalReadback := !isWireframe || !lastSampleHadReadback
+	if !wantLiveReadback {
+		needFinalReadback = true
 	}
-	gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+	if lastSampleHadReadback && wantLiveReadback {
+		needFinalReadback = false
+	}
+	// Wireframe всегда уже прочитан в цикле.
+	if isWireframe {
+		needFinalReadback = false
+	}
+
+	if needFinalReadback {
+		finalRB := startGPUTimer("final_readback")
+		gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT | gl.TEXTURE_FETCH_BARRIER_BIT | gl.SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+		currentPBO := r.pbo
+		if r.pboIndex == 1 {
+			currentPBO = r.pboBack
+		}
+
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, currentPBO)
+		gl.BindTexture(gl.TEXTURE_2D, r.imgTexture)
+		gl.GetTexImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.FLOAT, nil)
+		gl.MemoryBarrier(gl.PIXEL_BUFFER_BARRIER_BIT)
+
+		ptr := gl.MapBuffer(gl.PIXEL_PACK_BUFFER, gl.READ_ONLY)
+		dst := img.Pix
+		if ptr != nil {
+			tmp := r.ensureReadTmp(pixelCount)
+			src := (*[1 << 28]float32)(ptr)[:len(tmp)]
+			copy(tmp, src)
+			gl.UnmapBuffer(gl.PIXEL_PACK_BUFFER)
+			tonemapHDRToRGBA(dst, tmp, pixelCount)
+		}
+		gl.BindBuffer(gl.PIXEL_PACK_BUFFER, 0)
+		finalRB.stop()
+	} else {
+		gpuLogf("skip duplicate final_readback (already have last sample)")
+	}
 
 	cfgDN := getDenoiseConfig()
 	w := cfg.Width
 	h := cfg.Height
-	if cfgDN.Enabled && w > 2 && h > 2 {
+	dst := img.Pix
+	// Bilateral на CPU: на preview (мало spp) пропускаем — дорогой и мало полезен.
+	runDenoise := cfgDN.Enabled && w > 2 && h > 2 && cfg.SamplesPerPx >= 4
+	if cfgDN.Enabled && cfg.SamplesPerPx < 4 {
+		gpuLogf("skip cpu_denoise for preview spp=%d", cfg.SamplesPerPx)
+	}
+	if runDenoise {
+		dnT := startGPUTimer("cpu_denoise")
 		smoothed := make([]byte, len(dst))
 		sigmaS := cfgDN.SigmaS
 		sigmaR := cfgDN.SigmaR
@@ -3551,7 +3532,6 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 						nb := float64(dst[ni+2]) / 255.0
 
 						ds2 := float64(kx*kx + ky*ky)
-						// расстояние в цветовом пространстве (sRGB 0..1)
 						dr := cr - nr
 						dg := cg - ng
 						dbb := cb - nb
@@ -3592,7 +3572,6 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 					smoothed[centerIdx+2] = uint8(nb*255.0 + 0.5)
 					smoothed[centerIdx+3] = 255
 				} else {
-					// fallback: копируем исходный пиксель
 					smoothed[centerIdx] = dst[centerIdx]
 					smoothed[centerIdx+1] = dst[centerIdx+1]
 					smoothed[centerIdx+2] = dst[centerIdx+2]
@@ -3601,13 +3580,16 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 			}
 		}
 		copy(dst, smoothed)
+		dnT.stop()
 	}
 
 	// Дополнительное, более сильное сглаживание (blur) по всему изображению.
 	// Используется простое box-усреднение с радиусом 1..5, затем смешивание
 	// с оригиналом по коэффициенту strength (0..1).
 	cfgSM := getSmoothConfig()
-	if cfgSM.Enabled && w > 2 && h > 2 && cfgSM.Radius > 0 && cfgSM.Strength > 0 {
+	runSmooth := cfgSM.Enabled && w > 2 && h > 2 && cfgSM.Radius > 0 && cfgSM.Strength > 0 && cfg.SamplesPerPx >= 4
+	if runSmooth {
+		smT := startGPUTimer("cpu_smooth")
 		rad := cfgSM.Radius
 		if rad < 1 {
 			rad = 1
@@ -3682,9 +3664,9 @@ func (r *gpuRenderer) renderOnce(sc *scene.Scene, cfg RenderConfig, img *image.R
 			}
 		}
 		copy(dst, blurred)
+		smT.stop()
 	}
 
-	// Финальное обновление UI после всех обработок
 	if progress != nil {
 		progress(cfg.SamplesPerPx, cfg.SamplesPerPx)
 	}

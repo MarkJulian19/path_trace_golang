@@ -26,5 +26,3 @@ func SetBackend(b Backend) {
 func GetBackend() Backend {
 	return currentBackend
 }
-
-

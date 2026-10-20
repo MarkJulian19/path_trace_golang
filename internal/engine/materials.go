@@ -3,7 +3,7 @@ package engine
 import (
 	"math"
 
-	"github.com/user/pathtracer/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/scene"
 )
 
 type materialType int

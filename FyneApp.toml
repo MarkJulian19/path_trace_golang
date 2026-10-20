@@ -1,0 +1,6 @@
+[Details]
+Name = "Go Path Tracer"
+ID = "com.markjulian19.pathtracer"
+
+[Migrations]
+fyneDo = true

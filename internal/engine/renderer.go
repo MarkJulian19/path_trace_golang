@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/user/pathtracer/internal/engine/gpu"
-	"github.com/user/pathtracer/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/engine/gpu"
+	"github.com/MarkJulian19/path_trace_golang/internal/scene"
 )
 
 // Режим рендеринга для CPU: 0 = normal, 1 = wireframe
@@ -348,13 +348,13 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 		if dirLen > 0 {
 			viewDir := vec3{x: -r.dir.x / dirLen, y: -r.dir.y / dirLen, z: -r.dir.z / dirLen} // Направление к камере
 			edgeFactor := math.Abs(rec.normal.x*viewDir.x + rec.normal.y*viewDir.y + rec.normal.z*viewDir.z)
-			
+
 			// Для wireframe показываем только когда нормаль почти перпендикулярна направлению взгляда
 			edgeThreshold := 0.1 // Более строгий порог для четких контуров
 			if edgeFactor < edgeThreshold {
 				return vec3{x: 1.0, y: 1.0, z: 1.0} // Белый цвет для контуров
 			}
-			
+
 			// Также показываем грани кубов и плоскости
 			absNormalX := math.Abs(rec.normal.x)
 			absNormalY := math.Abs(rec.normal.y)
@@ -485,7 +485,7 @@ func PickObject(sc *scene.Scene, cfg RenderConfig, x, y int) int {
 	if y >= cfg.Height {
 		y = cfg.Height - 1
 	}
-	
+
 	// Преобразуем координаты пикселя в UV координаты [0,1]
 	// Важно: используем точное преобразование координат, как в шейдере
 	// В шейдере: u = (float(pix.x) + stratumU) / float(uWidth - 1)
@@ -495,46 +495,46 @@ func PickObject(sc *scene.Scene, cfg RenderConfig, x, y int) int {
 	uCoord := float64(x) / float64(cfg.Width-1)
 	fy := float64(cfg.Height - 1 - y) // Инвертируем Y точно как в шейдере
 	vCoord := fy / float64(cfg.Height-1)
-	
+
 	// Создаем камеру для raycast - точно так же, как в buildCamera
 	aspect := float64(cfg.Width) / float64(cfg.Height)
 	if sc.Camera.AspectRatio != 0 {
 		aspect = sc.Camera.AspectRatio
 	}
-	
+
 	theta := sc.Camera.FOV * math.Pi / 180.0
 	h := math.Tan(theta / 2)
 	viewportHeight := 2.0 * h
 	viewportWidth := aspect * viewportHeight
-	
+
 	origin := v(sc.Camera.Position.X, sc.Camera.Position.Y, sc.Camera.Position.Z)
 	target := v(sc.Camera.Target.X, sc.Camera.Target.Y, sc.Camera.Target.Z)
 	up := v(sc.Camera.Up.X, sc.Camera.Up.Y, sc.Camera.Up.Z)
-	
+
 	w := origin.sub(target).unit()
 	uVec := up.cross(w).unit()
 	vVec := w.cross(uVec)
-	
+
 	focusDist := sc.Camera.FocusDist
 	if focusDist == 0 {
 		focusDist = origin.sub(target).length()
 	}
-	
+
 	horizontal := uVec.mul(viewportWidth * focusDist)
 	vertical := vVec.mul(viewportHeight * focusDist)
 	lowerLeftCorner := origin.sub(horizontal.div(2)).sub(vertical.div(2)).sub(w.mul(focusDist))
-	
+
 	// Создаем луч через точку (u, v) - точно так же, как в buildCamera
 	dir := lowerLeftCorner.add(horizontal.mul(uCoord)).add(vertical.mul(vCoord)).sub(origin)
 	ray := ray{orig: origin, dir: dir.unit()}
-	
+
 	// Преобразуем сцену в world для проверки пересечений
 	world := sceneToWorld(sc)
-	
+
 	// Проверяем пересечение со всеми объектами и находим БЛИЖАЙШИЙ (первый пересеченный)
 	closestT := math.MaxFloat64
 	closestObjIndex := -1
-	
+
 	for i := range sc.Objects {
 		var rec hitRecord
 		// Используем closestT как tMax для раннего выхода
@@ -546,7 +546,7 @@ func PickObject(sc *scene.Scene, cfg RenderConfig, x, y int) int {
 			}
 		}
 	}
-	
+
 	return closestObjIndex
 }
 

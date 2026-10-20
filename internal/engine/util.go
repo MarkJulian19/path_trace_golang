@@ -6,7 +6,7 @@ import (
 	"image/png"
 	"os"
 
-	"github.com/user/pathtracer/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/scene"
 )
 
 // RenderScene performs path tracing of the given scene using provided settings.
