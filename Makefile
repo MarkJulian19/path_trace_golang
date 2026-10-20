@@ -55,7 +55,7 @@ endif
 BIN := ./$(BIN_DIR)/$(APP)
 
 .PHONY: help build native linux windows darwin all clean deps deps-windows \
-	fmt lint \
+	fmt lint generate test test-race bench bench-profile \
 	run headless scenes \
 	run-simple run-gpu run-metal run-rtx run-showcase run-test run-comprehensive \
 	headless-simple headless-gpu headless-metal headless-rtx headless-showcase headless-test headless-comprehensive
@@ -65,6 +65,28 @@ fmt:
 
 lint:
 	golangci-lint run
+
+generate:
+	$(GO) generate ./...
+
+test:
+	$(GO) test ./...
+
+test-race:
+	$(GO) test -race ./...
+
+bench:
+	$(GO) test ./internal/usecases/render ./internal/repository/scenejson ./internal/usecases/scene \
+		-run '^$$' -bench '^(BenchmarkRender|BenchmarkInto|BenchmarkPickObject|BenchmarkScene$$|BenchmarkSavePNG|BenchmarkInterpolateCamera|BenchmarkVideoSequence|BenchmarkServiceAPI/(Render|Into|Scene)|BenchmarkServiceVideoSequence|BenchmarkCreateVideoFromFrames|BenchmarkRepository(Load|Save))' -benchmem -count=5
+	$(GO) test ./internal/usecases/render ./internal/repository/scenejson ./internal/usecases/scene ./internal/transport/gpu ./internal/service \
+		-run '^$$' -bench '^(BenchmarkSettingsForMode|BenchmarkDefaultVideoEncodingConfig|BenchmarkRepositoryNew|BenchmarkSceneUsecase(New|Load|Save)|BenchmarkServiceAPI/(New|SetBackend|GetBackend|SetCPURenderMode|GetCPURenderMode)|BenchmarkServiceGPUControls|BenchmarkGPU|BenchmarkContainerNew)' -benchmem -benchtime=100ms -count=3
+	$(GO) test -tags benchinternal ./internal/usecases/render ./internal/repository/scenejson ./internal/transport/gpu \
+		-run '^$$' -bench '^BenchmarkInternal' -benchmem -benchtime=100ms -count=3
+
+bench-profile:
+	mkdir -p $(BIN_DIR)/profiles
+	$(GO) test ./internal/usecases/render -run '^$$' -bench '^BenchmarkRender/medium$$' \
+		-benchmem -cpuprofile=$(BIN_DIR)/profiles/render.cpu.pprof -memprofile=$(BIN_DIR)/profiles/render.mem.pprof
 
 help:
 	@echo "Build:"

@@ -29,12 +29,12 @@ func newRandSource() *randSource {
 func (rs *randSource) Float64() float64 {
 	if rs == nil {
 		// Это не должно происходить в нормальной работе
-		return 0.5
+		return renderHalf
 	}
 
 	// Быстрый генератор используется после криптографической инициализации состояния.
-	rs.state ^= rs.state << 13
-	rs.state ^= rs.state >> 7
-	rs.state ^= rs.state << 17
-	return float64(rs.state>>11) * (1.0 / 9007199254740992.0)
+	rs.state ^= rs.state << renderRandomShiftA
+	rs.state ^= rs.state >> renderRandomShiftB
+	rs.state ^= rs.state << renderRandomShiftC
+	return float64(rs.state>>renderRandomMantissaShift) * (1.0 / renderRandomMantissaScale)
 }

@@ -46,18 +46,9 @@ func (s sphere) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	radiusSq := s.radius * s.radius
 	c := ocLenSq - radiusSq
 
-	discriminant := halfB*halfB - a*c
-	if discriminant < 0 {
+	root, ok := sphereRoot(a, halfB, c, tMin, tMax)
+	if !ok {
 		return false
-	}
-	sqrtD := math.Sqrt(discriminant)
-
-	root := (-halfB - sqrtD) / a
-	if root < tMin || root > tMax {
-		root = (-halfB + sqrtD) / a
-		if root < tMin || root > tMax {
-			return false
-		}
 	}
 
 	rec.t = root
@@ -88,6 +79,20 @@ func (s sphere) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	return true
 }
 
+func sphereRoot(a, halfB, c, tMin, tMax float64) (float64, bool) {
+	discriminant := halfB*halfB - a*c
+	if discriminant < 0 {
+		return 0, false
+	}
+	sqrtD := math.Sqrt(discriminant)
+	root := (-halfB - sqrtD) / a
+	if root >= tMin && root <= tMax {
+		return root, true
+	}
+	root = (-halfB + sqrtD) / a
+	return root, root >= tMin && root <= tMax
+}
+
 // Infinite plane (used as ground).
 type plane struct {
 	point  vec3
@@ -98,7 +103,7 @@ type plane struct {
 func (p plane) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	// Оптимизация: прямое вычисление без промежуточных структур
 	denom := p.normal.x*r.dir.x + p.normal.y*r.dir.y + p.normal.z*r.dir.z
-	if math.Abs(denom) < 1e-6 {
+	if math.Abs(denom) < renderRoughnessThreshold {
 		return false
 	}
 
@@ -142,28 +147,8 @@ func (b box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	t0 := tMin
 	t1 := tMax
 
-	for i := range 3 {
-		var invD, orig, minV, maxV float64
-		switch i {
-		case 0:
-			invD = 1 / r.dir.x
-			orig = r.orig.x
-			minV = b.min.x
-			maxV = b.max.x
-		case 1:
-			invD = 1 / r.dir.y
-			orig = r.orig.y
-			minV = b.min.y
-			maxV = b.max.y
-		default:
-			invD = 1 / r.dir.z
-			orig = r.orig.z
-			minV = b.min.z
-			maxV = b.max.z
-		}
-
-		tNear := (minV - orig) * invD
-		tFar := (maxV - orig) * invD
+	for axis := range 3 {
+		invD, tNear, tFar := b.axisInterval(r, axis)
 		if invD < 0 {
 			tNear, tFar = tFar, tNear
 		}
@@ -181,44 +166,54 @@ func (b box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	rec.t = t0
 	rec.p = r.at(t0)
 
-	// Правильное вычисление нормали: определяем, какая грань была пересечена
-	// Используем более точный метод на основе направления луча
-	var n vec3
-	// Вычисляем расстояние от точки до каждой грани
-	dxMin := rec.p.x - b.min.x
-	dxMax := b.max.x - rec.p.x
-	dyMin := rec.p.y - b.min.y
-	dyMax := b.max.y - rec.p.y
-	dzMin := rec.p.z - b.min.z
-	dzMax := b.max.z - rec.p.z
+	rec.setFaceNormal(r, b.normalAt(rec.p))
+	rec.mat = b.mat
+	return true
+}
 
-	// Находим минимальное расстояние (ближайшая грань)
+func (b box) normalAt(point vec3) vec3 {
+	dxMin := point.x - b.min.x
+	dxMax := b.max.x - point.x
+	dyMin := point.y - b.min.y
+	dyMax := b.max.y - point.y
+	dzMin := point.z - b.min.z
+	dzMax := b.max.z - point.z
 	minDist := dxMin
-	n = v(-1, 0, 0)
-
+	normal := v(-1, 0, 0)
 	if dxMax < minDist {
 		minDist = dxMax
-		n = v(1, 0, 0)
+		normal = v(1, 0, 0)
 	}
 	if dyMin < minDist {
 		minDist = dyMin
-		n = v(0, -1, 0)
+		normal = v(0, -1, 0)
 	}
 	if dyMax < minDist {
 		minDist = dyMax
-		n = v(0, 1, 0)
+		normal = v(0, 1, 0)
 	}
 	if dzMin < minDist {
 		minDist = dzMin
-		n = v(0, 0, -1)
+		normal = v(0, 0, -1)
 	}
 	if dzMax < minDist {
-		n = v(0, 0, 1)
+		normal = v(0, 0, 1)
 	}
+	return normal
+}
 
-	rec.setFaceNormal(r, n)
-	rec.mat = b.mat
-	return true
+func (b box) axisInterval(r ray, axis int) (float64, float64, float64) {
+	switch axis {
+	case 0:
+		invD := 1 / r.dir.x
+		return invD, (b.min.x - r.orig.x) * invD, (b.max.x - r.orig.x) * invD
+	case 1:
+		invD := 1 / r.dir.y
+		return invD, (b.min.y - r.orig.y) * invD, (b.max.y - r.orig.y) * invD
+	default:
+		invD := 1 / r.dir.z
+		return invD, (b.min.z - r.orig.z) * invD, (b.max.z - r.orig.z) * invD
+	}
 }
 
 // sceneToWorld builds hittable list from scene description.
@@ -230,42 +225,25 @@ func sceneToWorld(sc *scene.Scene) []hittable {
 
 	world := make([]hittable, 0, len(sc.Objects))
 	for _, o := range sc.Objects {
-		mat := materials[o.MaterialID]
-		pos := v(o.Position.X, o.Position.Y, o.Position.Z)
-		size := v(o.Size.X, o.Size.Y, o.Size.Z)
-
-		switch o.Type {
-		case scene.ObjectSphere:
-			world = append(world, sphere{
-				center: pos,
-				radius: size.x,
-				mat:    mat,
-			})
-		case scene.ObjectSphereLight:
-			// Сферический источник света - это сфера с emissive материалом
-			world = append(world, sphere{
-				center: pos,
-				radius: size.x,
-				mat:    mat,
-			})
-		case scene.ObjectPlane:
-			n := v(0, 1, 0)
-			world = append(world, plane{
-				point:  pos,
-				normal: n,
-				mat:    mat,
-			})
-		case scene.ObjectBox:
-			minimum := pos.sub(size.mul(0.5))
-			maximum := pos.add(size.mul(0.5))
-			world = append(world, box{
-				min: minimum,
-				max: maximum,
-				mat: mat,
-			})
-		default:
-			continue
+		object, ok := objectToHittable(o, materials[o.MaterialID])
+		if ok {
+			world = append(world, object)
 		}
 	}
 	return world
+}
+
+func objectToHittable(value scene.Object, mat material) (hittable, bool) {
+	pos := v(value.Position.X, value.Position.Y, value.Position.Z)
+	size := v(value.Size.X, value.Size.Y, value.Size.Z)
+	switch value.Type {
+	case scene.ObjectSphere, scene.ObjectSphereLight:
+		return sphere{center: pos, radius: size.x, mat: mat}, true
+	case scene.ObjectPlane:
+		return plane{point: pos, normal: v(0, 1, 0), mat: mat}, true
+	case scene.ObjectBox:
+		return box{min: pos.sub(size.mul(renderHalf)), max: pos.add(size.mul(renderHalf)), mat: mat}, true
+	default:
+		return nil, false
+	}
 }

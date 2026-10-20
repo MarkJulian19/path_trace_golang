@@ -93,14 +93,14 @@ func randomCosineDirection(normal vec3, rng *randSource) vec3 {
 	r2 := rng.Float64()
 
 	// Spherical coordinates for cosine-weighted hemisphere sampling
-	phi := 2.0 * math.Pi * r1
+	phi := renderViewportDiameter * math.Pi * r1
 	cosTheta := math.Sqrt(r2)
 	sinTheta := math.Sqrt(1.0 - r2)
 
 	// Create a local coordinate system aligned with the normal
 	// Choose an arbitrary vector not parallel to normal
 	var u vec3
-	if math.Abs(normal.x) > 0.9 {
+	if math.Abs(normal.x) > renderEdgeThreshold {
 		u = v(0, 1, 0)
 	} else {
 		u = v(1, 0, 0)

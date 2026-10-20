@@ -28,19 +28,19 @@ func SettingsForMode(mode string) scene.RenderSettings {
 	switch mode {
 	case "final":
 		return scene.RenderSettings{
-			Width:        1920,
-			Height:       1080,
+			Width:        defaultWidth,
+			Height:       defaultHeight,
 			SamplesPerPx: 1000,
-			MaxDepth:     80,
-			MaxRayDist:   1000.0, // Максимальная длина луча по умолчанию
+			MaxDepth:     defaultMaxDepth,
+			MaxRayDist:   defaultMaxRayDistance, // Максимальная длина луча по умолчанию
 		}
 	default:
 		return scene.RenderSettings{
-			Width:        400,
-			Height:       225,
-			SamplesPerPx: 20,
-			MaxDepth:     20,
-			MaxRayDist:   1000.0, // Максимальная длина луча по умолчанию
+			Width:        previewWidth,
+			Height:       previewHeight,
+			SamplesPerPx: previewSamplesPerPixel,
+			MaxDepth:     previewMaxDepth,
+			MaxRayDist:   defaultMaxRayDistance, // Максимальная длина луча по умолчанию
 		}
 	}
 }

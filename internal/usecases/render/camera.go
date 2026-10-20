@@ -22,9 +22,9 @@ func newCamera(scCam scene.Camera, cfg Config, rng *randSource) camera {
 		aspect = scCam.AspectRatio
 	}
 
-	theta := scCam.FOV * math.Pi / 180
+	theta := scCam.FOV * math.Pi / renderDegreesPerHalfTurn
 	h := math.Tan(theta / 2)
-	viewportHeight := 2.0 * h
+	viewportHeight := renderViewportDiameter * h
 	viewportWidth := aspect * viewportHeight
 
 	origin := v(scCam.Position.X, scCam.Position.Y, scCam.Position.Z)
@@ -42,7 +42,9 @@ func newCamera(scCam scene.Camera, cfg Config, rng *randSource) camera {
 
 	horizontal := u.mul(viewportWidth * focusDist)
 	vertical := vVec.mul(viewportHeight * focusDist)
-	lowerLeftCorner := origin.sub(horizontal.div(2)).sub(vertical.div(2)).sub(w.mul(focusDist))
+	lowerLeftCorner := origin.sub(horizontal.div(renderViewportDiameter)).
+		sub(vertical.div(renderViewportDiameter)).
+		sub(w.mul(focusDist))
 
 	return camera{
 		origin:          origin,
@@ -52,7 +54,7 @@ func newCamera(scCam scene.Camera, cfg Config, rng *randSource) camera {
 		u:               u,
 		v:               vVec,
 		w:               w,
-		lensRadius:      scCam.Aperture / 2,
+		lensRadius:      scCam.Aperture / renderViewportDiameter,
 		rng:             rng,
 	}
 }

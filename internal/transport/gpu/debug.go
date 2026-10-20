@@ -35,40 +35,35 @@ var (
 )
 
 func ensureGPUDebugConfig() {
-	gpuDebugOnce.Do(func() {
-		livePreview.Store(true)
-		temporalOn.Store(true)
-		v := strings.ToLower(os.Getenv("PATHTRACER_GPU_DEBUG"))
-		gpuDebugOn.Store(v == "1" || v == enabledValue || v == "on" || v == positiveValue)
+	gpuDebugOnce.Do(configureGPUDebug)
+}
 
-		if lv := os.Getenv("PATHTRACER_GPU_LIVE_READBACK"); lv != "" {
-			switch strings.ToLower(lv) {
-			case "0", disabledValue, negativeValue, "no":
-				livePreview.Store(false)
-			case "1", enabledValue, "on", positiveValue:
-				livePreview.Store(true)
-			default:
-				// Сохраняем значение по умолчанию.
-			}
-		}
-		if tv := os.Getenv("PATHTRACER_GPU_TEMPORAL"); tv != "" {
-			switch strings.ToLower(tv) {
-			case "0", disabledValue, negativeValue, "no":
-				temporalOn.Store(false)
-			case "1", enabledValue, "on", positiveValue:
-				temporalOn.Store(true)
-			default:
-				// Сохраняем значение по умолчанию.
-			}
-		}
-		if gpuDebugOn.Load() {
-			log.Printf(
-				"[gpu] debug logging enabled (live_readback=%v temporal=%v)",
-				livePreview.Load(),
-				temporalOn.Load(),
-			)
-		}
-	})
+func configureGPUDebug() {
+	livePreview.Store(readEnvBool("PATHTRACER_GPU_LIVE_READBACK", true))
+	temporalOn.Store(readEnvBool("PATHTRACER_GPU_TEMPORAL", true))
+	gpuDebugOn.Store(readEnvBool("PATHTRACER_GPU_DEBUG", false))
+	if gpuDebugOn.Load() {
+		log.Printf(
+			"[gpu] debug logging enabled (live_readback=%v temporal=%v)",
+			livePreview.Load(),
+			temporalOn.Load(),
+		)
+	}
+}
+
+func readEnvBool(name string, fallback bool) bool {
+	value := strings.ToLower(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "0", disabledValue, negativeValue, "no":
+		return false
+	case "1", enabledValue, "on", positiveValue:
+		return true
+	default:
+		return fallback
+	}
 }
 
 // SetLivePreview включает/выключает промежуточный readback кадра для live-UI.

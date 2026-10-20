@@ -1,6 +1,8 @@
 package scenejson
 
 import (
+	"encoding/json"
+
 	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
 
@@ -33,8 +35,8 @@ type cameraFile struct {
 	Up          vec3File `json:"up"`
 	FOV         float64  `json:"fov"`
 	Aperture    float64  `json:"aperture"`
-	FocusDist   float64  `json:"focus_dist"`
-	AspectRatio float64  `json:"aspect_ratio"`
+	FocusDist   float64  `json:"focusDist"`
+	AspectRatio float64  `json:"aspectRatio"`
 }
 
 type materialFile struct {
@@ -49,7 +51,7 @@ type materialFile struct {
 	Smoothness      float64   `json:"smoothness"`
 	Reflectivity    float64   `json:"reflectivity"`
 	Tint            colorFile `json:"tint"`
-	AbsorptionScale float64   `json:"absorption_scale"`
+	AbsorptionScale float64   `json:"absorptionScale"`
 }
 
 type objectFile struct {
@@ -57,29 +59,29 @@ type objectFile struct {
 	Type       string   `json:"type"`
 	Position   vec3File `json:"position"`
 	Size       vec3File `json:"size"`
-	MaterialID string   `json:"material_id"`
+	MaterialID string   `json:"materialId"`
 }
 
 type renderSettingsFile struct {
 	Width        int     `json:"width"`
 	Height       int     `json:"height"`
-	SamplesPerPx int     `json:"samples_per_px"`
-	MaxDepth     int     `json:"max_depth"`
-	MaxRayDist   float64 `json:"max_ray_dist"`
+	SamplesPerPx int     `json:"samplesPerPx"`
+	MaxDepth     int     `json:"maxDepth"`
+	MaxRayDist   float64 `json:"maxRayDist"`
 }
 
 type fogFile struct {
 	Density        float64   `json:"density"`
 	Color          colorFile `json:"color"`
 	Scatter        float64   `json:"scatter"`
-	SigmaS         float64   `json:"sigma_s"`
-	SigmaA         float64   `json:"sigma_a"`
+	SigmaS         float64   `json:"sigmaS"`
+	SigmaA         float64   `json:"sigmaA"`
 	G              float64   `json:"g"`
-	HeteroStrength float64   `json:"hetero_strength"`
-	NoiseScale     float64   `json:"noise_scale"`
-	NoiseOctaves   int       `json:"noise_octaves"`
-	AffectSky      bool      `json:"affect_sky"`
-	GPUVolumetric  bool      `json:"gpu_volumetric"`
+	HeteroStrength float64   `json:"heteroStrength"`
+	NoiseScale     float64   `json:"noiseScale"`
+	NoiseOctaves   int       `json:"noiseOctaves"`
+	AffectSky      bool      `json:"affectSky"`
+	GPUVolumetric  bool      `json:"gpuVolumetric"`
 }
 
 type skyFile struct {
@@ -87,6 +89,172 @@ type skyFile struct {
 	Color   colorFile `json:"color"`
 	Horizon colorFile `json:"horizon"`
 	Zenith  colorFile `json:"zenith"`
+}
+
+func unmarshalLegacyJSON(data []byte, target any, replacements map[string]string) error {
+	var fields map[string]json.RawMessage
+	err := json.Unmarshal(data, &fields)
+	if err != nil {
+		return err
+	}
+	for currentKey, legacyKey := range replacements {
+		if raw, ok := fields[legacyKey]; ok {
+			fields[currentKey] = raw
+			delete(fields, legacyKey)
+		}
+	}
+	normalized, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(normalized, target)
+}
+
+func marshalLegacyJSON(value any, replacements map[string]string) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]any
+	err = json.Unmarshal(data, &fields)
+	if err != nil {
+		return nil, err
+	}
+	for currentKey, legacyKey := range replacements {
+		if value, ok := fields[currentKey]; ok {
+			fields[legacyKey] = value
+			delete(fields, currentKey)
+		}
+	}
+	return json.Marshal(fields)
+}
+
+// UnmarshalJSON decodes camera fields while accepting legacy snake_case names.
+func (value *cameraFile) UnmarshalJSON(data []byte) error {
+	type alias cameraFile
+	var decoded alias
+	err := unmarshalLegacyJSON(data, &decoded, map[string]string{
+		"focusDist":   "focus_dist",
+		"aspectRatio": "aspect_ratio",
+	})
+	if err != nil {
+		return err
+	}
+	*value = cameraFile(decoded)
+	return nil
+}
+
+// MarshalJSON encodes camera fields using legacy snake_case names.
+func (value cameraFile) MarshalJSON() ([]byte, error) {
+	type alias cameraFile
+	return marshalLegacyJSON(alias(value), map[string]string{
+		"focusDist":   "focus_dist",
+		"aspectRatio": "aspect_ratio",
+	})
+}
+
+// UnmarshalJSON decodes material fields while accepting legacy snake_case names.
+func (value *materialFile) UnmarshalJSON(data []byte) error {
+	type alias materialFile
+	var decoded alias
+	err := unmarshalLegacyJSON(data, &decoded, map[string]string{
+		"absorptionScale": "absorption_scale",
+	})
+	if err != nil {
+		return err
+	}
+	*value = materialFile(decoded)
+	return nil
+}
+
+// MarshalJSON encodes material fields using legacy snake_case names.
+func (value materialFile) MarshalJSON() ([]byte, error) {
+	type alias materialFile
+	return marshalLegacyJSON(alias(value), map[string]string{
+		"absorptionScale": "absorption_scale",
+	})
+}
+
+// UnmarshalJSON decodes object fields while accepting legacy snake_case names.
+func (value *objectFile) UnmarshalJSON(data []byte) error {
+	type alias objectFile
+	var decoded alias
+	err := unmarshalLegacyJSON(data, &decoded, map[string]string{
+		"materialId": "material_id",
+	})
+	if err != nil {
+		return err
+	}
+	*value = objectFile(decoded)
+	return nil
+}
+
+// MarshalJSON encodes object fields using legacy snake_case names.
+func (value objectFile) MarshalJSON() ([]byte, error) {
+	type alias objectFile
+	return marshalLegacyJSON(alias(value), map[string]string{
+		"materialId": "material_id",
+	})
+}
+
+// UnmarshalJSON decodes render settings while accepting legacy snake_case names.
+func (value *renderSettingsFile) UnmarshalJSON(data []byte) error {
+	type alias renderSettingsFile
+	var decoded alias
+	err := unmarshalLegacyJSON(data, &decoded, map[string]string{
+		"samplesPerPx": "samples_per_px",
+		"maxDepth":     "max_depth",
+		"maxRayDist":   "max_ray_dist",
+	})
+	if err != nil {
+		return err
+	}
+	*value = renderSettingsFile(decoded)
+	return nil
+}
+
+// MarshalJSON encodes render settings using legacy snake_case names.
+func (value renderSettingsFile) MarshalJSON() ([]byte, error) {
+	type alias renderSettingsFile
+	return marshalLegacyJSON(alias(value), map[string]string{
+		"samplesPerPx": "samples_per_px",
+		"maxDepth":     "max_depth",
+		"maxRayDist":   "max_ray_dist",
+	})
+}
+
+// UnmarshalJSON decodes fog fields while accepting legacy snake_case names.
+func (value *fogFile) UnmarshalJSON(data []byte) error {
+	type alias fogFile
+	var decoded alias
+	err := unmarshalLegacyJSON(data, &decoded, map[string]string{
+		"sigmaS":         "sigma_s",
+		"sigmaA":         "sigma_a",
+		"heteroStrength": "hetero_strength",
+		"noiseScale":     "noise_scale",
+		"noiseOctaves":   "noise_octaves",
+		"affectSky":      "affect_sky",
+		"gpuVolumetric":  "gpu_volumetric",
+	})
+	if err != nil {
+		return err
+	}
+	*value = fogFile(decoded)
+	return nil
+}
+
+// MarshalJSON encodes fog fields using legacy snake_case names.
+func (value fogFile) MarshalJSON() ([]byte, error) {
+	type alias fogFile
+	return marshalLegacyJSON(alias(value), map[string]string{
+		"sigmaS":         "sigma_s",
+		"sigmaA":         "sigma_a",
+		"heteroStrength": "hetero_strength",
+		"noiseScale":     "noise_scale",
+		"noiseOctaves":   "noise_octaves",
+		"affectSky":      "affect_sky",
+		"gpuVolumetric":  "gpu_volumetric",
+	})
 }
 
 func toEntity(value sceneFile) *scene.Scene {

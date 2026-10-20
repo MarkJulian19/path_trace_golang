@@ -12,44 +12,68 @@ type blenderDarkTheme struct {
 	variant fyne.ThemeVariant
 }
 
+var blenderThemeColors = map[fyne.ThemeColorName]color.Color{
+	theme.ColorNameBackground: color.RGBA{
+		R: uiThemeBackground,
+		G: uiThemeBackground,
+		B: uiThemeBackground,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNameButton: color.RGBA{R: uiThemeButton, G: uiThemeButton, B: uiThemeButton, A: uiThemeAlpha},
+	theme.ColorNameDisabledButton: color.RGBA{
+		R: uiThemeDisabled,
+		G: uiThemeDisabled,
+		B: uiThemeDisabled,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNameForeground: color.RGBA{
+		R: uiThemeForeground,
+		G: uiThemeForeground,
+		B: uiThemeForeground,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNameDisabled: color.RGBA{
+		R: uiThemeTextMuted,
+		G: uiThemeTextMuted,
+		B: uiThemeTextMuted,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNamePlaceHolder: color.RGBA{
+		R: uiThemePlaceholder,
+		G: uiThemePlaceholder,
+		B: uiThemePlaceholder,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNamePrimary:   color.RGBA{R: uiThemePrimary, G: uiThemeGreen, B: uiThemeBlue, A: uiThemeAlpha},
+	theme.ColorNameHover:     color.RGBA{R: uiThemeHover, G: uiThemeHover, B: uiThemeHover, A: uiThemeAlpha},
+	theme.ColorNameFocus:     color.RGBA{R: uiThemePrimary, G: uiThemeGreen, B: uiThemeBlue, A: uiThemeAlpha},
+	theme.ColorNameScrollBar: color.RGBA{R: uiThemeButton, G: uiThemeButton, B: uiThemeButton, A: uiThemeAlpha},
+	theme.ColorNameShadow:    color.RGBA{R: 0, G: 0, B: 0, A: uiThemePlaceholder},
+	theme.ColorNameSeparator: color.RGBA{
+		R: uiThemeDisabled,
+		G: uiThemeDisabled,
+		B: uiThemeDisabled,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNameInputBackground: color.RGBA{
+		R: uiThemeDisabled,
+		G: uiThemeDisabled,
+		B: uiThemeDisabled,
+		A: uiThemeAlpha,
+	},
+	theme.ColorNameInputBorder: color.RGBA{R: uiThemeButton, G: uiThemeButton, B: uiThemeButton, A: uiThemeAlpha},
+}
+
 func newBlenderDarkTheme() fyne.Theme {
 	return &blenderDarkTheme{variant: theme.VariantDark}
 }
 
 // Color возвращает цвет темы для указанного элемента интерфейса.
 func (t *blenderDarkTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	switch name {
-	case theme.ColorNameBackground:
-		return color.RGBA{R: 0x1e, G: 0x1e, B: 0x1e, A: 0xff} // Темный фон как в Blender
-	case theme.ColorNameButton:
-		return color.RGBA{R: 0x3d, G: 0x3d, B: 0x3d, A: 0xff} // Кнопки
-	case theme.ColorNameDisabledButton:
-		return color.RGBA{R: 0x2a, G: 0x2a, B: 0x2a, A: 0xff} // Отключенные кнопки
-	case theme.ColorNameForeground:
-		return color.RGBA{R: 0xcc, G: 0xcc, B: 0xcc, A: 0xff} // Основной текст
-	case theme.ColorNameDisabled:
-		return color.RGBA{R: 0x66, G: 0x66, B: 0x66, A: 0xff} // Отключенный текст
-	case theme.ColorNamePlaceHolder:
-		return color.RGBA{R: 0x88, G: 0x88, B: 0x88, A: 0xff} // Плейсхолдер
-	case theme.ColorNamePrimary:
-		return color.RGBA{R: 0x37, G: 0x6f, B: 0xa5, A: 0xff} // Основной цвет (синий как в Blender)
-	case theme.ColorNameHover:
-		return color.RGBA{R: 0x4a, G: 0x4a, B: 0x4a, A: 0xff} // Hover
-	case theme.ColorNameFocus:
-		return color.RGBA{R: 0x37, G: 0x6f, B: 0xa5, A: 0xff} // Фокус
-	case theme.ColorNameScrollBar:
-		return color.RGBA{R: 0x3d, G: 0x3d, B: 0x3d, A: 0xff} // Скроллбар
-	case theme.ColorNameShadow:
-		return color.RGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x88} // Тень
-	case theme.ColorNameSeparator:
-		return color.RGBA{R: 0x2a, G: 0x2a, B: 0x2a, A: 0xff} // Разделитель
-	case theme.ColorNameInputBackground:
-		return color.RGBA{R: 0x2a, G: 0x2a, B: 0x2a, A: 0xff} // Фон ввода
-	case theme.ColorNameInputBorder:
-		return color.RGBA{R: 0x3d, G: 0x3d, B: 0x3d, A: 0xff} // Граница ввода
-	default:
-		return theme.DefaultTheme().Color(name, variant)
+	if value, ok := blenderThemeColors[name]; ok {
+		return value
 	}
+	return theme.DefaultTheme().Color(name, variant)
 }
 
 // Font возвращает шрифт темы.
