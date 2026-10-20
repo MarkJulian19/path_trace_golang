@@ -6,9 +6,10 @@ import (
 	"log"
 	"os"
 
-	"github.com/MarkJulian19/path_trace_golang/internal/engine"
-	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/service"
 	"github.com/MarkJulian19/path_trace_golang/internal/ui"
+	"github.com/MarkJulian19/path_trace_golang/internal/usecases/render"
+	scenecase "github.com/MarkJulian19/path_trace_golang/internal/usecases/scene"
 )
 
 func main() {
@@ -22,41 +23,49 @@ func main() {
 
 	flag.Parse()
 	log.Printf("flags: scene=%s mode=%s headless=%v out=%s\n", *scenePath, *mode, *headless, *output)
+	application := service.New()
 
 	if *useGPU {
-		engine.SetBackend(engine.BackendGPU)
+		application.Render.SetBackend(render.BackendGPU)
 	} else {
-		engine.SetBackend(engine.BackendCPU)
+		application.Render.SetBackend(render.BackendCPU)
 	}
 
 	if *headless {
-		if err := renderHeadless(*scenePath, *mode, *output); err != nil {
+		err := renderHeadless(*scenePath, *mode, *output, application.Scenes, application.Render)
+		if err != nil {
 			log.Println("headless render error:", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	if err := ui.Run(*scenePath, *mode); err != nil {
+	err := ui.Run(*scenePath, *mode, application.Scenes, application.Render)
+	if err != nil {
 		log.Println("ui error:", err)
 		os.Exit(1)
 	}
 }
 
-func renderHeadless(scenePath, mode, outPath string) error {
-	sc, err := scene.Load(scenePath)
+func renderHeadless(
+	scenePath, mode, outPath string,
+	scenes *scenecase.Scene,
+	renderer *render.Service,
+) error {
+	sc, err := scenes.Load(scenePath)
 	if err != nil {
 		return fmt.Errorf("load scene: %w", err)
 	}
 
-	settings := engine.RenderSettingsForMode(mode)
+	settings := render.SettingsForMode(mode)
 
-	img, err := engine.RenderScene(sc, settings)
+	img, err := renderer.Scene(sc, settings)
 	if err != nil {
 		return fmt.Errorf("render scene: %w", err)
 	}
 
-	if err := engine.SavePNG(outPath, img); err != nil {
+	err = render.SavePNG(outPath, img)
+	if err != nil {
 		return fmt.Errorf("save png: %w", err)
 	}
 	return nil

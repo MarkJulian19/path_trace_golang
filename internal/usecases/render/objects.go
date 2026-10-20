@@ -1,9 +1,9 @@
-package engine
+package render
 
 import (
 	"math"
 
-	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
 
 type hitRecord struct {
@@ -142,7 +142,7 @@ func (b box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	t0 := tMin
 	t1 := tMax
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		var invD, orig, minV, maxV float64
 		switch i {
 		case 0:
@@ -256,13 +256,15 @@ func sceneToWorld(sc *scene.Scene) []hittable {
 				mat:    mat,
 			})
 		case scene.ObjectBox:
-			min := pos.sub(size.mul(0.5))
-			max := pos.add(size.mul(0.5))
+			minimum := pos.sub(size.mul(0.5))
+			maximum := pos.add(size.mul(0.5))
 			world = append(world, box{
-				min: min,
-				max: max,
+				min: minimum,
+				max: maximum,
 				mat: mat,
 			})
+		default:
+			continue
 		}
 	}
 	return world

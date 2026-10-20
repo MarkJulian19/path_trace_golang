@@ -6,9 +6,10 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// pickableCanvas обертка для canvas.Image с поддержкой кликов
+// pickableCanvas обертка для canvas.Image с поддержкой кликов.
 type pickableCanvas struct {
 	widget.BaseWidget
+
 	img    *canvas.Image
 	onTap  func(x, y int)
 	onDrag func(x1, y1, x2, y2 int)
@@ -24,6 +25,7 @@ func newPickableCanvas(img *canvas.Image, onTap func(x, y int), onDrag func(x1, 
 	return p
 }
 
+// CreateRenderer создаёт отрисовщик изображения с обработкой ввода.
 func (p *pickableCanvas) CreateRenderer() fyne.WidgetRenderer {
 	return &pickableCanvasRenderer{
 		pickable: p,
@@ -36,25 +38,30 @@ type pickableCanvasRenderer struct {
 	img      *canvas.Image
 }
 
+// Layout размещает изображение внутри виджета.
 func (r *pickableCanvasRenderer) Layout(size fyne.Size) {
 	r.img.Resize(size)
 }
 
+// MinSize возвращает минимальный размер изображения.
 func (r *pickableCanvasRenderer) MinSize() fyne.Size {
 	return r.img.MinSize()
 }
 
+// Objects возвращает объекты, отрисовываемые рендерером.
 func (r *pickableCanvasRenderer) Objects() []fyne.CanvasObject {
 	return []fyne.CanvasObject{r.img}
 }
 
+// Refresh обновляет изображение.
 func (r *pickableCanvasRenderer) Refresh() {
 	r.img.Refresh()
 }
 
+// Destroy освобождает ресурсы рендерера.
 func (r *pickableCanvasRenderer) Destroy() {}
 
-// Tapped обрабатывает клик на canvas
+// Tapped обрабатывает клик на canvas.
 func (p *pickableCanvas) Tapped(ev *fyne.PointEvent) {
 	if p.onTap != nil {
 		// Преобразуем координаты клика в координаты изображения
@@ -111,7 +118,7 @@ func (p *pickableCanvas) Tapped(ev *fyne.PointEvent) {
 	}
 }
 
-// Dragged обрабатывает перетаскивание
+// Dragged обрабатывает перетаскивание.
 func (p *pickableCanvas) Dragged(ev *fyne.DragEvent) {
 	if p.onDrag != nil {
 		size := p.Size()
@@ -130,4 +137,5 @@ func (p *pickableCanvas) Dragged(ev *fyne.DragEvent) {
 	}
 }
 
+// DragEnd завершает перетаскивание изображения.
 func (p *pickableCanvas) DragEnd() {}

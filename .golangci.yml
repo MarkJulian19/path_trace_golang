@@ -1,0 +1,295 @@
+version: "2"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  fix: false
+
+run:
+  concurrency: 16
+  timeout: 5m
+  relative-path-mode: gomod
+  tests: true
+  modules-download-mode: readonly
+
+severity:
+  default: error
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - golines
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+      no-inline-comments: true
+      no-prefix-comments: true
+      custom-order: true
+    gofmt:
+      rewrite-rules:
+        - pattern: 'interface{}'
+          replacement: 'any'
+        - pattern: 'a[b:len(a)]'
+          replacement: 'a[b:]'
+    golines:
+      max-len: 120
+      tab-len: 4
+      shorten-comments: true
+      reformat-tags: false
+      chain-split-dots: true
+
+linters:
+  default: all
+  disable:
+    - wsl
+    - depguard
+    - exhaustruct
+    - exhaustruct_v5
+    - goheader
+    - gomoddirectives
+    - gomodguard
+    - nlreturn
+    - prealloc
+    - promlinter
+    - nonamedreturns
+    - protogetter
+    - sloglint
+    - spancheck
+    - decorder
+    - godox
+    - importas
+    - misspell
+    - dogsled
+    - arangolint
+    - clickhouselint
+    - ginkgolinter
+    - gochecksumtype
+    - gosmopolitan
+    - loggercheck
+    - rowserrcheck
+    - sqlclosecheck
+    - testableexamples
+    - unqueryvet
+    - zerologlint
+    - dupl
+    - gochecknoglobals
+    - grouper
+    - inamedparam
+    - ireturn
+    - maintidx
+    - varnamelen
+    - wsl_v5
+    - gocyclo
+    - lll
+    - containedctx
+    - contextcheck
+    - wrapcheck
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - revive
+          - goconst
+          - funlen
+          - gocognit
+          - cyclop
+  settings:
+    cyclop:
+      max-complexity: 10
+    embeddedstructfieldcheck:
+      forbid-mutex: true
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    errchkjson:
+      check-error-free-encoding: false
+      report-no-exported: true
+    errorlint:
+      errorf: true
+      errorf-multi: true
+      asserts: true
+      comparison: true
+    exhaustive:
+      check:
+        - switch
+      default-signifies-exhaustive: true
+    fatcontext:
+      check-struct-pointers: true
+    forbidigo:
+      forbid:
+        - pattern: ^print(ln)?$
+        - pattern: ^fmt\.Print.*$
+          msg: Do not commit print statements.
+      exclude-godoc-examples: true
+      analyze-types: true
+    funcorder:
+      constructor: true
+      struct-method: true
+      alphabetical: false
+    funlen:
+      lines: 40
+      statements: 40
+      ignore-comments: true
+    gocognit:
+      min-complexity: 20
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+      match-constant: true
+      numbers: true
+      ignore-calls: true
+      find-duplicates: true
+      eval-const-expressions: true
+    gocritic:
+      disable-all: false
+      enabled-checks:
+        - badLock
+        - badRegexp
+        - badSorting
+        - builtinShadowDecl
+        - dynamicFmtString
+        - emptyDecl
+        - evalOrder
+        - externalErrorReassign
+        - filepathJoin
+        - nilValReturn
+        - regexpPattern
+        - returnAfterHttpError
+        - sloppyReassign
+        - sortSlice
+        - sprintfQuotedString
+        - sqlQuery
+        - syncMapLoadAndDelete
+        - truncateCmp
+        - uncheckedInlineErr
+        - unnecessaryDefer
+        - weakCond
+        - equalFold
+        - indexAlloc
+        - preferDecodeRune
+        - stringXbytes
+    godot:
+      scope: declarations
+      capital: true
+    iface:
+      enable:
+        - identical
+        - unexported
+    interfacebloat:
+      max: 15
+    makezero:
+      always: false
+    mnd:
+      ignored-numbers:
+        - '2'
+        - '10'
+        - '16'
+        - '32'
+        - '64'
+        - '100'
+        - '1000'
+      ignored-functions:
+        - strconv.FormatInt
+        - strconv.ParseInt
+        - strconv.FormatFloat
+        - strconv.ParseFloat
+    nestif:
+      min-complexity: 4
+    nilnil:
+      only-two: true
+      detect-opposite: true
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+    paralleltest:
+      ignore-missing: false
+      ignore-missing-subtests: false
+    reassign:
+      patterns:
+        - ".*"
+    revive:
+      severity: error
+      confidence: 0.0
+      directives:
+        - name: specify-disable-reason
+          severity: error
+      rules:
+        - name: atomic
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: datarace
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-block
+        - name: enforce-switch-style
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: identical-branches
+        - name: if-return
+        - name: import-alias-naming
+          arguments:
+            - allow-regex: "^[a-z][a-zA-Z0-9]{0,}$"
+              deny-regex: '^v\d+$'
+        - name: import-shadowing
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: modifies-parameter
+        - name: modifies-value-receiver
+        - name: optimize-operands-order
+        - name: range
+        - name: range-val-address
+        - name: range-val-in-closure
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: redundant-import-alias
+        - name: string-of-int
+        - name: struct-tag
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unconditional-recursion
+        - name: unexported-return
+        - name: unnecessary-format
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: use-any
+        - name: use-slices-sort
+        - name: useless-break
+        - name: var-declaration
+        - name: waitgroup-by-value
+        - name: exported
+          arguments:
+            - "check-private-receivers"
+            - "disable-stuttering-check"
+            - "say-repetitive-instead-of-stutters"
+    tagliatelle:
+      case:
+        rules:
+          json: camel
+          yaml: camel
+          xml: camel
+          toml: camel
+          bson: camel
+          avro: snake
+          mapstructure: kebab
+          env: upperSnake
+          envconfig: upperSnake
+    testifylint:
+      enable-all: true
+    testpackage:
+      skip-regexp: (export|internal)_test\.go
+      allow-packages:
+        - main

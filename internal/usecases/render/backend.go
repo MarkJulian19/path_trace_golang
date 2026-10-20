@@ -1,28 +1,11 @@
-package engine
+package render
 
-// Backend defines where heavy rendering computations are executed.
-// Right now we support CPU and a placeholder for GPU.
+// Backend задаёт место выполнения тяжёлых вычислений рендера.
 type Backend int
 
 const (
+	// BackendCPU выбирает CPU-рендерер.
 	BackendCPU Backend = iota
+	// BackendGPU выбирает GPU-рендерер с откатом на CPU.
 	BackendGPU
 )
-
-var currentBackend = BackendCPU
-
-// SetBackend selects active render backend (CPU or GPU).
-// If an unknown value is passed, CPU backend will be used.
-func SetBackend(b Backend) {
-	switch b {
-	case BackendCPU, BackendGPU:
-		currentBackend = b
-	default:
-		currentBackend = BackendCPU
-	}
-}
-
-// GetBackend returns currently selected render backend.
-func GetBackend() Backend {
-	return currentBackend
-}

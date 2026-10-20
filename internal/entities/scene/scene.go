@@ -1,100 +1,104 @@
 package scene
 
-import (
-	"image"
-	"image/color"
-)
-
-// Vec3 represents a simple 3D vector or point.
+// Vec3 описывает трёхмерную точку или вектор.
 type Vec3 struct {
-	X float64 `json:"x"`
-	Y float64 `json:"y"`
-	Z float64 `json:"z"`
+	X float64
+	Y float64
+	Z float64
 }
 
-// Color is an RGB color in linear space.
+// Color описывает цвет RGB в линейном цветовом пространстве.
 type Color struct {
-	R float64 `json:"r"`
-	G float64 `json:"g"`
-	B float64 `json:"b"`
+	R float64
+	G float64
+	B float64
 }
 
-// Camera describes the viewpoint for the renderer.
+// Camera описывает положение и параметры камеры.
 type Camera struct {
-	Position Vec3    `json:"position"`
-	Target   Vec3    `json:"target"`
-	Up       Vec3    `json:"up"`
-	FOV      float64 `json:"fov"`
+	Position Vec3
+	Target   Vec3
+	Up       Vec3
+	FOV      float64
 
-	Aperture    float64 `json:"aperture"`
-	FocusDist   float64 `json:"focus_dist"`
-	AspectRatio float64 `json:"aspect_ratio"`
+	Aperture    float64
+	FocusDist   float64
+	AspectRatio float64
 }
 
-// MaterialType enumerates supported material kinds.
+// MaterialType задаёт поддерживаемый тип материала.
 type MaterialType string
 
 const (
-	MaterialLambert    MaterialType = "lambert"
-	MaterialMetal      MaterialType = "metal"
+	// MaterialLambert — диффузный материал.
+	MaterialLambert MaterialType = "lambert"
+	// MaterialMetal — отражающий металлический материал.
+	MaterialMetal MaterialType = "metal"
+	// MaterialDielectric — прозрачный материал.
 	MaterialDielectric MaterialType = "dielectric"
-	MaterialEmissive   MaterialType = "emissive"
-	MaterialMirror     MaterialType = "mirror"
+	// MaterialEmissive — материал-источник света.
+	MaterialEmissive MaterialType = "emissive"
+	// MaterialMirror — идеальное зеркало.
+	MaterialMirror MaterialType = "mirror"
 )
 
-// Material describes surface properties.
+// Material описывает свойства поверхности.
 type Material struct {
-	ID   string       `json:"id"`
-	Type MaterialType `json:"type"`
+	ID   string
+	Type MaterialType
 
-	Albedo Color   `json:"albedo"`
-	Rough  float64 `json:"rough"` // for metal and lambert (roughness), deprecated for metals (use Smoothness)
-	IOR    float64 `json:"ior"`   // for dielectric
+	Albedo Color
+	Rough  float64 // for metal and lambert (roughness), deprecated for metals (use Smoothness)
+	IOR    float64 // for dielectric
 
-	Emit  Color   `json:"emit"`  // emissive color
-	Power float64 `json:"power"` // emissive intensity multiplier
+	Emit  Color   // emissive color
+	Power float64 // emissive intensity multiplier
 
 	// Absorption for dielectric materials (color tinting through glass)
 	// Higher values mean more absorption (darker color)
-	Absorption Color `json:"absorption"` // for dielectric (default: 0,0,0 = no absorption)
+	Absorption Color // for dielectric (default: 0,0,0 = no absorption)
 
 	// Advanced parameters for metals
-	Smoothness   float64 `json:"smoothness"`   // for metals: 0.0 = matte, 1.0 = perfect mirror (default: 1.0)
-	Reflectivity float64 `json:"reflectivity"` // for metals: 0.0-1.0, controls reflection intensity (default: 1.0)
+	Smoothness   float64 // for metals: 0.0 = matte, 1.0 = perfect mirror (default: 1.0)
+	Reflectivity float64 // for metals: 0.0-1.0, controls reflection intensity (default: 1.0)
 
 	// Advanced parameters for dielectrics (glass)
-	Tint            Color   `json:"tint"`             // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
-	AbsorptionScale float64 `json:"absorption_scale"` // for dielectric: scale factor for absorption coefficient (default: 0.01, units are in cm)
+	Tint            Color   // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
+	AbsorptionScale float64 // for dielectric: scale factor for absorption coefficient (default: 0.01, units are in cm)
 }
 
-// ObjectType enumerates supported geometric primitives.
+// ObjectType задаёт поддерживаемый тип геометрического примитива.
 type ObjectType string
 
 const (
-	ObjectSphere      ObjectType = "sphere"
-	ObjectPlane       ObjectType = "plane"
-	ObjectBox         ObjectType = "box"
+	// ObjectSphere — сферический примитив.
+	ObjectSphere ObjectType = "sphere"
+	// ObjectPlane — бесконечная плоскость.
+	ObjectPlane ObjectType = "plane"
+	// ObjectBox — осевой параллелепипед.
+	ObjectBox ObjectType = "box"
+	// ObjectSphereLight — сферический источник света.
 	ObjectSphereLight ObjectType = "sphere_light"
 )
 
-// Object is a single entity in the scene.
+// Object описывает один объект сцены.
 type Object struct {
-	ID   string     `json:"id"`
-	Type ObjectType `json:"type"`
+	ID   string
+	Type ObjectType
 
-	Position Vec3 `json:"position"`
-	Size     Vec3 `json:"size"` // radius for sphere: use X, for planes/boxes: extents
+	Position Vec3
+	Size     Vec3 // radius for sphere: use X, for planes/boxes: extents
 
-	MaterialID string `json:"material_id"`
+	MaterialID string
 }
 
-// RenderSettings defines quality/performance parameters.
+// RenderSettings задаёт параметры качества и производительности рендера.
 type RenderSettings struct {
-	Width        int     `json:"width"`
-	Height       int     `json:"height"`
-	SamplesPerPx int     `json:"samples_per_px"`
-	MaxDepth     int     `json:"max_depth"`
-	MaxRayDist   float64 `json:"max_ray_dist"` // Максимальная длина луча (для предотвращения бесконечной трассировки)
+	Width        int
+	Height       int
+	SamplesPerPx int
+	MaxDepth     int
+	MaxRayDist   float64 // Максимальная длина луча (для предотвращения бесконечной трассировки)
 }
 
 // Fog описывает туман / участвующую среду.
@@ -102,95 +106,58 @@ type RenderSettings struct {
 type Fog struct {
 	// Простой параметр плотности для обратной совместимости.
 	// Если заданы SigmaS/SigmaA, то Density рассматривается как базовая экстинкция и может быть 0.
-	Density float64 `json:"density"` // 0 = нет тумана, >0 = базовая экстинкция
+	Density float64 // 0 = нет тумана, >0 = базовая экстинкция
 
 	// Базовый цвет тумана/лучей.
-	Color Color `json:"color"` // базовый цвет тумана/лучей
+	Color Color // базовый цвет тумана/лучей
 
 	// Насколько сильно туман рассеивает свет в сторону камеры (0..1).
 	// При 0 — чистое поглощение, при 1 — сильные видимые лучи. Используется как множитель для SigmaS.
-	Scatter float64 `json:"scatter"`
+	Scatter float64
 
 	// Физические коэффициенты объёмной среды (опционально).
 	// Если оба равны 0, они будут выведены из Density/Scatter.
 	// sigma_t = sigma_a + sigma_s определяет общее затухание вдоль луча.
-	SigmaS float64 `json:"sigma_s"` // коэффициент рассеяния
-	SigmaA float64 `json:"sigma_a"` // коэффициент поглощения
+	SigmaS float64 // коэффициент рассеяния
+	SigmaA float64 // коэффициент поглощения
 
 	// Анизотропия фазовой функции Хеньи–Грина (−0.9..0.9).
 	// g > 0 даёт направленные лучи от источников (god rays), g < 0 — обратное рассеяние.
-	G float64 `json:"g"`
+	G float64
 
 	// Параметры неоднородного (шумового) тумана.
 	// Если HeteroStrength = 0, туман считается однородным.
-	HeteroStrength float64 `json:"hetero_strength"` // 0..1, сила модификации плотности шумом
-	NoiseScale     float64 `json:"noise_scale"`     // базовая частота шума (меньше = более крупные «облака»)
-	NoiseOctaves   int     `json:"noise_octaves"`   // количество октав фрактального шума (1..5)
+	HeteroStrength float64 // 0..1, сила модификации плотности шумом
+	NoiseScale     float64 // базовая частота шума (меньше = более крупные «облака»)
+	NoiseOctaves   int     // количество октав фрактального шума (1..5)
 
 	// Влияет ли туман на фон/небо. Если false, sky почти не глушится.
-	AffectSky bool `json:"affect_sky"`
+	AffectSky bool
 
 	// Включение нового физически‑реалистичного объёмного тумана только для GPU.
 	// Если false, GPU может использовать упрощённую модель или полностью выключить объёмный туман.
-	GPUVolumetric bool `json:"gpu_volumetric"`
+	GPUVolumetric bool
 }
 
-// Sky describes sky/environment settings.
+// Sky задаёт параметры неба и окружающей среды.
 type Sky struct {
-	Type    string `json:"type"`    // "solid" or "gradient"
-	Color   Color  `json:"color"`   // for solid type
-	Horizon Color  `json:"horizon"` // for gradient type
-	Zenith  Color  `json:"zenith"`  // for gradient type
+	Type    string // "solid" or "gradient"
+	Color   Color  // for solid type
+	Horizon Color  // for gradient type
+	Zenith  Color  // for gradient type
 }
 
-// Scene holds everything needed to render an image.
+// Scene содержит всё необходимое для построения изображения.
 type Scene struct {
-	Name      string         `json:"name"`
-	Camera    Camera         `json:"camera"`
-	Objects   []Object       `json:"objects"`
-	Materials []Material     `json:"materials"`
-	Settings  RenderSettings `json:"settings"`
+	Name      string
+	Camera    Camera
+	Objects   []Object
+	Materials []Material
+	Settings  RenderSettings
 
-	Background Color `json:"background"` // deprecated, use Sky instead
-	Sky        *Sky  `json:"sky"`        // new sky system
+	Background Color // deprecated, use Sky instead
+	Sky        *Sky  // new sky system
 
 	// Необязательный однородный туман для GPU path tracer.
-	Fog *Fog `json:"fog,omitempty"`
-}
-
-// ToImageColor converts linear Color to sRGB image color.
-func (c Color) ToImageColor() color.Color {
-	clamp := func(v float64) uint8 {
-		if v < 0 {
-			v = 0
-		}
-		if v > 1 {
-			v = 1
-		}
-		// gamma correction
-		v = pow(v, 1.0/2.2)
-		return uint8(v * 255.999)
-	}
-	return color.RGBA{
-		R: clamp(c.R),
-		G: clamp(c.G),
-		B: clamp(c.B),
-		A: 255,
-	}
-}
-
-// NewImage allocates an RGBA image for the scene.
-func NewImage(w, h int) *image.RGBA {
-	return image.NewRGBA(image.Rect(0, 0, w, h))
-}
-
-// tiny pow implementation to avoid importing math here for now.
-func pow(x, y float64) float64 {
-	// naive exponentiation via math.Pow will be used in engine;
-	// here we keep it simple and delegate to engine if needed.
-	// This function is intentionally tiny and not heavily used.
-	if y == 1 {
-		return x
-	}
-	return x
+	Fog *Fog
 }

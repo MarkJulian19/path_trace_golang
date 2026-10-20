@@ -55,9 +55,16 @@ endif
 BIN := ./$(BIN_DIR)/$(APP)
 
 .PHONY: help build native linux windows darwin all clean deps deps-windows \
+	fmt lint \
 	run headless scenes \
 	run-simple run-gpu run-metal run-rtx run-showcase run-test run-comprehensive \
 	headless-simple headless-gpu headless-metal headless-rtx headless-showcase headless-test headless-comprehensive
+
+fmt:
+	golangci-lint fmt
+
+lint:
+	golangci-lint run
 
 help:
 	@echo "Build:"

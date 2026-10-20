@@ -1,7 +1,6 @@
-package engine
+package render
 
 import (
-	"fmt"
 	"image"
 	"math"
 	"os"
@@ -9,68 +8,37 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/MarkJulian19/path_trace_golang/internal/engine/gpu"
-	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
+	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
 
-// Режим рендеринга для CPU: 0 = normal, 1 = wireframe
-var (
-	cpuRenderMode      int = 0
-	cpuRenderModeMutex sync.RWMutex
-)
-
-// SetCPURenderMode устанавливает режим рендеринга для CPU.
-// mode: 0 = normal, 1 = wireframe
-func SetCPURenderMode(mode int) {
-	cpuRenderModeMutex.Lock()
-	defer cpuRenderModeMutex.Unlock()
-	if mode < 0 {
-		mode = 0
-	}
-	if mode > 1 {
-		mode = 1
-	}
-	cpuRenderMode = mode
-}
-
-// GetCPURenderMode возвращает текущий режим рендеринга для CPU.
-func GetCPURenderMode() int {
-	cpuRenderModeMutex.RLock()
-	defer cpuRenderModeMutex.RUnlock()
-	return cpuRenderMode
-}
-
-// RenderConfig defines internal render parameters.
-type RenderConfig struct {
-	Width        int
-	Height       int
-	SamplesPerPx int
-	MaxDepth     int
-	MaxRayDist   float32 // Максимальная длина луча (для предотвращения бесконечной трассировки)
-}
+// Config задаёт параметры рендера на границе сценария.
+type Config = renderentity.Config
 
 // Render performs a simple path tracing render of the given scene and returns a new image.
-func Render(sc *scene.Scene, cfg RenderConfig) image.Image {
+func Render(sc *scene.Scene, cfg Config) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
-	RenderInto(sc, cfg, img, nil)
+	renderIntoCPU(sc, cfg, img, nil, 0)
 	return img
 }
 
-// RenderInto renders the scene into the provided image.
+// Into строит сцену в переданном изображении.
 // If progress is not nil, it will be called periodically from worker goroutines
 // after finishing a row to allow interactive preview.
-// progress(currentSample, totalSamples) - currentSample is the current sample being rendered (1-based), totalSamples is the total number of samples.
-func RenderInto(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) {
-	switch GetBackend() {
-	case BackendGPU:
-		renderIntoGPU(sc, cfg, img, progress)
-	default:
-		renderIntoCPU(sc, cfg, img, progress)
-	}
+// Progress(currentSample, totalSamples) - currentSample is the current sample being rendered (1-based), totalSamples is
+// the total number of samples.
+func Into(sc *scene.Scene, cfg Config, img *image.RGBA, progress func(currentSample, totalSamples int)) {
+	renderIntoCPU(sc, cfg, img, progress, 0)
 }
 
-// renderIntoCPU contains the original CPU implementation.
-func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) {
+// renderIntoCPU строит изображение на CPU.
+func renderIntoCPU(
+	sc *scene.Scene,
+	cfg Config,
+	img *image.RGBA,
+	progress func(currentSample, totalSamples int),
+	wireframeMode int,
+) {
 	b := img.Bounds()
 	if b.Dx() != cfg.Width || b.Dy() != cfg.Height {
 		// basic safety: resize not supported, just return
@@ -115,7 +83,7 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 		} else {
 			bgColor = v(sc.Background.R, sc.Background.G, sc.Background.B)
 		}
-		bgFunc = func(r ray) vec3 {
+		bgFunc = func(_ ray) vec3 {
 			return bgColor
 		}
 	}
@@ -143,14 +111,12 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 	var wg sync.WaitGroup
 	// Определяем количество воркеров: округленное вниз количество потоков * 1.2
 	// Можно переопределить через переменную окружения PATHTRACER_WORKERS
-	workerCount := runtime.NumCPU()
-	if workerCount < 1 {
-		workerCount = 1
-	}
+	workerCount := max(runtime.NumCPU(), 1)
 
 	// Проверяем переменную окружения для ручной настройки
 	if envWorkers := os.Getenv("PATHTRACER_WORKERS"); envWorkers != "" {
-		if customWorkers, err := strconv.Atoi(envWorkers); err == nil && customWorkers > 0 {
+		customWorkers, err := strconv.Atoi(envWorkers)
+		if err == nil && customWorkers > 0 {
 			if customWorkers <= 128 { // Разумный максимум
 				workerCount = customWorkers
 			}
@@ -189,10 +155,8 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 	processedPixels := int64(0)
 	var progressMu sync.Mutex
 
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workerCount {
+		wg.Go(func() {
 			localRng := newRandSource()
 			// Создаем камеру с локальным rng для безопасности конкурентного доступа
 			localCam := newCamera(sc.Camera, cfg, localRng)
@@ -208,12 +172,14 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 						xFloat := float64(x)
 
 						// Разворачиваем внутренний цикл для лучшей оптимизации компилятором
-						for s := 0; s < cfg.SamplesPerPx; s++ {
+						for range cfg.SamplesPerPx {
 							u := (xFloat + localRng.Float64()) * invWidth
 							vv := (flipY + localRng.Float64()) * invHeight
 							r := localCam.getRay(u, vv)
 							var sampleRec hitRecord
-							col = col.add(rayColorOpt(r, world, bgFunc, cfg.MaxDepth, localRng, &sampleRec))
+							col = col.add(
+								rayColorOpt(r, world, bgFunc, cfg.MaxDepth, localRng, &sampleRec, wireframeMode),
+							)
 						}
 
 						// Гамма-коррекция с предвычисленным invSamples
@@ -256,16 +222,13 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 				if progress != nil {
 					progressMu.Lock()
 					processedPixels += int64(tilePixels * cfg.SamplesPerPx)
-					currentSample := int(float64(processedPixels) / float64(pixelCount))
-					if currentSample > cfg.SamplesPerPx {
-						currentSample = cfg.SamplesPerPx
-					}
+					currentSample := min(int(float64(processedPixels)/float64(pixelCount)), cfg.SamplesPerPx)
 					progressMu.Unlock()
 					// Обновляем прогресс после каждого тайла
 					progress(currentSample, cfg.SamplesPerPx)
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -276,46 +239,17 @@ func renderIntoCPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress 
 	}
 }
 
-// renderIntoGPU executes GPU rendering using compute shaders.
-// If GPU path fails for any reason, it falls back to CPU renderer.
-func renderIntoGPU(sc *scene.Scene, cfg RenderConfig, img *image.RGBA, progress func(currentSample, totalSamples int)) {
-	gpuCfg := gpu.RenderConfig{
-		Width:        cfg.Width,
-		Height:       cfg.Height,
-		SamplesPerPx: cfg.SamplesPerPx,
-		MaxDepth:     cfg.MaxDepth,
-		MaxRayDist:   cfg.MaxRayDist,
-	}
-	if err := gpu.Render(sc, gpuCfg, img, progress); err != nil {
-		// Логируем ошибку для отладки
-		fmt.Fprintf(os.Stderr, "GPU render error: %v\nFalling back to CPU renderer.\n", err)
-		// Если что-то пошло не так с OpenGL/GLFW, безопасно рендерим на CPU.
-		renderIntoCPU(sc, cfg, img, progress)
-	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func rayColor(r ray, world []hittable, background func(ray) vec3, depth int, rng *randSource) vec3 {
-	var rec hitRecord
-	return rayColorOpt(r, world, background, depth, rng, &rec)
-}
-
 // Оптимизированная версия rayColor с переиспользованием hitRecord
-// rec используется только для текущего уровня, для рекурсивных вызовов создаются новые
-func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, rng *randSource, rec *hitRecord) vec3 {
+// rec используется только для текущего уровня, для рекурсивных вызовов создаются новые.
+func rayColorOpt(
+	r ray,
+	world []hittable,
+	background func(ray) vec3,
+	depth int,
+	rng *randSource,
+	rec *hitRecord,
+	wireframeMode int,
+) vec3 {
 	if depth <= 0 {
 		return vec3{x: 0, y: 0, z: 0}
 	}
@@ -335,14 +269,14 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 
 	if !hitAnything {
 		// Wireframe режим: черный фон
-		if GetCPURenderMode() == 1 {
+		if wireframeMode == 1 {
 			return vec3{x: 0, y: 0, z: 0}
 		}
 		return background(r)
 	}
 
 	// Wireframe режим: рисуем только контуры объектов
-	if GetCPURenderMode() == 1 {
+	if wireframeMode == 1 {
 		// Используем нормаль для определения краев
 		dirLen := math.Sqrt(r.dir.x*r.dir.x + r.dir.y*r.dir.y + r.dir.z*r.dir.z)
 		if dirLen > 0 {
@@ -460,7 +394,7 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 	// Создаём новый rec для рекурсивного вызова, чтобы избежать перезаписи
 	var nextRec hitRecord
 	// Оптимизация: вычисляем attenuation * rayColorOpt напрямую
-	nextColor := rayColorOpt(scattered, world, background, depth-1, rng, &nextRec)
+	nextColor := rayColorOpt(scattered, world, background, depth-1, rng, &nextRec, wireframeMode)
 	return vec3{
 		x: emitted.x + attenuation.x*nextColor.x,
 		y: emitted.y + attenuation.y*nextColor.y,
@@ -470,8 +404,8 @@ func rayColorOpt(r ray, world []hittable, background func(ray) vec3, depth int, 
 
 // PickObject выполняет raycast для определения объекта под курсором
 // Возвращает индекс объекта или -1, если объект не найден
-// Строит луч из камеры через указанную точку экрана и находит первый пересеченный объект
-func PickObject(sc *scene.Scene, cfg RenderConfig, x, y int) int {
+// Строит луч из камеры через указанную точку экрана и находит первый пересеченный объект.
+func PickObject(sc *scene.Scene, cfg Config, x, y int) int {
 	// Ограничиваем координаты
 	if x < 0 {
 		x = 0
@@ -548,8 +482,4 @@ func PickObject(sc *scene.Scene, cfg RenderConfig, x, y int) int {
 	}
 
 	return closestObjIndex
-}
-
-func (a vec3) mulVec(b vec3) vec3 {
-	return vec3{x: a.x * b.x, y: a.y * b.y, z: a.z * b.z}
 }

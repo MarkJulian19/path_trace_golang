@@ -7,7 +7,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// blenderDarkTheme реализует темную тему в стиле Blender
+// blenderDarkTheme реализует темную тему в стиле Blender.
 type blenderDarkTheme struct {
 	variant fyne.ThemeVariant
 }
@@ -16,6 +16,7 @@ func newBlenderDarkTheme() fyne.Theme {
 	return &blenderDarkTheme{variant: theme.VariantDark}
 }
 
+// Color возвращает цвет темы для указанного элемента интерфейса.
 func (t *blenderDarkTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNameBackground:
@@ -51,14 +52,17 @@ func (t *blenderDarkTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVar
 	}
 }
 
+// Font возвращает шрифт темы.
 func (t *blenderDarkTheme) Font(style fyne.TextStyle) fyne.Resource {
 	return theme.DefaultTheme().Font(style)
 }
 
+// Icon возвращает иконку темы.
 func (t *blenderDarkTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
 	return theme.DefaultTheme().Icon(name)
 }
 
+// Size возвращает размер элемента темы.
 func (t *blenderDarkTheme) Size(name fyne.ThemeSizeName) float32 {
 	return theme.DefaultTheme().Size(name)
 }

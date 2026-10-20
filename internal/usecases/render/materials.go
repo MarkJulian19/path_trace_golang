@@ -1,9 +1,9 @@
-package engine
+package render
 
 import (
 	"math"
 
-	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
 
 type materialType int
@@ -31,13 +31,15 @@ func convertMaterial(m scene.Material) material {
 	abs := v(m.Absorption.R, m.Absorption.G, m.Absorption.B)
 
 	switch m.Type {
+	case scene.MaterialLambert:
+		return material{typ: matLambert, albedo: al, rough: clamp01(m.Rough), absorption: vec3{x: 0, y: 0, z: 0}}
 	case scene.MaterialMetal:
 		// Для металлов используем Smoothness, если задан, иначе вычисляем из Rough
 		rough := m.Rough
 		if m.Smoothness > 0 {
-			rough = 1.0 - clamp(m.Smoothness, 0, 1)
+			rough = 1.0 - clamp01(m.Smoothness)
 		}
-		return material{typ: matMetal, albedo: al, rough: clamp(rough, 0, 1), absorption: vec3{x: 0, y: 0, z: 0}}
+		return material{typ: matMetal, albedo: al, rough: clamp01(rough), absorption: vec3{x: 0, y: 0, z: 0}}
 	case scene.MaterialDielectric:
 		ior := m.IOR
 		if ior == 0 {
@@ -49,17 +51,16 @@ func convertMaterial(m scene.Material) material {
 	case scene.MaterialMirror:
 		return material{typ: matMirror, albedo: al, absorption: vec3{x: 0, y: 0, z: 0}}
 	default:
-		// Lambert может иметь шероховатость для более реалистичного вида
-		return material{typ: matLambert, albedo: al, rough: clamp(m.Rough, 0, 1), absorption: vec3{x: 0, y: 0, z: 0}}
+		return material{typ: matLambert, albedo: al, rough: clamp01(m.Rough), absorption: vec3{x: 0, y: 0, z: 0}}
 	}
 }
 
-func clamp(x, minVal, maxVal float64) float64 {
-	if x < minVal {
-		return minVal
+func clamp01(x float64) float64 {
+	if x < 0 {
+		return 0
 	}
-	if x > maxVal {
-		return maxVal
+	if x > 1 {
+		return 1
 	}
 	return x
 }
@@ -151,12 +152,11 @@ func (m material) scatter(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3,
 				orig: rec.p,
 				dir:  vec3{x: scatteredDirX, y: scatteredDirY, z: scatteredDirZ},
 			}
-		} else {
-			// Идеальное зеркальное отражение (roughness = 0)
-			return true, m.albedo, ray{
-				orig: rec.p,
-				dir:  reflected,
-			}
+		}
+		// Идеальное зеркальное отражение (roughness = 0)
+		return true, m.albedo, ray{
+			orig: rec.p,
+			dir:  reflected,
 		}
 
 	case matDielectric:
@@ -226,6 +226,6 @@ func (m material) scatter(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3,
 func reflectance(cosine, refIdx float64) float64 {
 	// Schlick approximation
 	r0 := (1 - refIdx) / (1 + refIdx)
-	r0 = r0 * r0
+	r0 *= r0
 	return r0 + (1-r0)*math.Pow(1-cosine, 5)
 }

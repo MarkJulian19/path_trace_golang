@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+const (
+	enabledValue  = "true"
+	disabledValue = "false"
+	positiveValue = "yes"
+	negativeValue = "off"
+)
+
 // PATHTRACER_GPU_DEBUG: 1/true/on — подробные тайминги GPU-пайплайна в лог.
 // PATHTRACER_GPU_LIVE_READBACK: 0 — не читать кадр на каждом N-м сэмпле (только финал).
 // PATHTRACER_GPU_TEMPORAL: 0 — отключить CopyImageSubData каждый сэмпл.
@@ -27,34 +34,39 @@ var (
 	glVersion  string
 )
 
-func init() {
-	livePreview.Store(true)
-	temporalOn.Store(true)
-}
-
 func ensureGPUDebugConfig() {
 	gpuDebugOnce.Do(func() {
+		livePreview.Store(true)
+		temporalOn.Store(true)
 		v := strings.ToLower(os.Getenv("PATHTRACER_GPU_DEBUG"))
-		gpuDebugOn.Store(v == "1" || v == "true" || v == "on" || v == "yes")
+		gpuDebugOn.Store(v == "1" || v == enabledValue || v == "on" || v == positiveValue)
 
 		if lv := os.Getenv("PATHTRACER_GPU_LIVE_READBACK"); lv != "" {
 			switch strings.ToLower(lv) {
-			case "0", "false", "off", "no":
+			case "0", disabledValue, negativeValue, "no":
 				livePreview.Store(false)
-			case "1", "true", "on", "yes":
+			case "1", enabledValue, "on", positiveValue:
 				livePreview.Store(true)
+			default:
+				// Сохраняем значение по умолчанию.
 			}
 		}
 		if tv := os.Getenv("PATHTRACER_GPU_TEMPORAL"); tv != "" {
 			switch strings.ToLower(tv) {
-			case "0", "false", "off", "no":
+			case "0", disabledValue, negativeValue, "no":
 				temporalOn.Store(false)
-			case "1", "true", "on", "yes":
+			case "1", enabledValue, "on", positiveValue:
 				temporalOn.Store(true)
+			default:
+				// Сохраняем значение по умолчанию.
 			}
 		}
 		if gpuDebugOn.Load() {
-			log.Printf("[gpu] debug logging enabled (live_readback=%v temporal=%v)", livePreview.Load(), temporalOn.Load())
+			log.Printf(
+				"[gpu] debug logging enabled (live_readback=%v temporal=%v)",
+				livePreview.Load(),
+				temporalOn.Load(),
+			)
 		}
 	})
 }
@@ -100,11 +112,11 @@ func setGLInfo(vendor, renderer, version string) {
 	if soft {
 		// CopyImageSubData 1080p×N на softGL — чистый CPU.
 		temporalOn.Store(false)
-		log.Printf("[gpu] WARNING: software OpenGL detected — compute runs on CPU, discrete GPU stays idle")
+		log.Print("[gpu] WARNING: software OpenGL detected — compute runs on CPU, discrete GPU stays idle")
 		log.Printf("[gpu]   GL_VENDOR   = %s", vendor)
 		log.Printf("[gpu]   GL_RENDERER = %s", renderer)
 		log.Printf("[gpu]   GL_VERSION  = %s", version)
-		log.Printf("[gpu]   On WSL use a Windows-native build or GPU passthrough for real GPU load")
+		log.Print("[gpu]   On WSL use a Windows-native build or GPU passthrough for real GPU load")
 	} else {
 		log.Printf("[gpu] GL_VENDOR=%s", vendor)
 		log.Printf("[gpu] GL_RENDERER=%s", renderer)

@@ -1,9 +1,9 @@
-package engine
+package render
 
 import (
 	"math"
 
-	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
 
 type camera struct {
@@ -16,7 +16,7 @@ type camera struct {
 	rng             *randSource
 }
 
-func newCamera(scCam scene.Camera, cfg RenderConfig, rng *randSource) camera {
+func newCamera(scCam scene.Camera, cfg Config, rng *randSource) camera {
 	aspect := float64(cfg.Width) / float64(cfg.Height)
 	if scCam.AspectRatio != 0 {
 		aspect = scCam.AspectRatio

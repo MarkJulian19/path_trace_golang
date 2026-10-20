@@ -19,14 +19,22 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/MarkJulian19/path_trace_golang/internal/engine"
-	"github.com/MarkJulian19/path_trace_golang/internal/engine/gpu"
-	"github.com/MarkJulian19/path_trace_golang/internal/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
+	engine "github.com/MarkJulian19/path_trace_golang/internal/usecases/render"
+	scenecase "github.com/MarkJulian19/path_trace_golang/internal/usecases/scene"
 )
 
-// logFilter фильтрует некритичные ошибки GLFW из логов
+// logFilter фильтрует некритичные ошибки GLFW из логов.
 type logFilter struct {
 	original io.Writer
+}
+
+// isWireframeMode сообщает, активен ли режим каркасного рендера.
+func isWireframeMode(renderService *engine.Service) bool {
+	if renderService.GetBackend() == engine.BackendGPU {
+		return renderService.GetRenderMode() == 1
+	}
+	return renderService.GetCPURenderMode() == 1
 }
 
 func (f *logFilter) Write(p []byte) (n int, err error) {
@@ -39,8 +47,8 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 	return f.original.Write(p)
 }
 
-// Run starts the interactive UI with the given scene file.
-func Run(scenePath, mode string) error {
+// Run запускает интерактивный интерфейс с указанной сценой и сценарием рендера.
+func Run(scenePath, mode string, scenes *scenecase.Scene, renderService *engine.Service) error {
 	log.Printf("UI: starting with scene %q, mode=%s\n", scenePath, mode)
 
 	// Подавляем некритичные ошибки GLFW (например, Invalid scancode на Windows)
@@ -64,13 +72,13 @@ func Run(scenePath, mode string) error {
 		fyne.Do(fn)
 	}
 
-	sc, err := scene.Load(scenePath)
+	sc, err := scenes.Load(scenePath)
 	if err != nil {
 		return err
 	}
 
 	// базовые настройки рендера
-	baseSettings := engine.RenderSettingsForMode(mode)
+	baseSettings := engine.SettingsForMode(mode)
 	if sc.Settings.Width > 0 && sc.Settings.Height > 0 {
 		baseSettings.Width = sc.Settings.Width
 		baseSettings.Height = sc.Settings.Height
@@ -98,8 +106,8 @@ func Run(scenePath, mode string) error {
 	// текущее изображение, в которое рендерит движок
 	var img *image.RGBA
 	img = image.NewRGBA(image.Rect(0, 0, previewSettings.Width, previewSettings.Height))
-	for y := 0; y < previewSettings.Height; y++ {
-		for x := 0; x < previewSettings.Width; x++ {
+	for y := range previewSettings.Height {
+		for x := range previewSettings.Width {
 			img.Set(x, y, color.RGBA{0, 0, 0, 255})
 		}
 	}
@@ -149,10 +157,10 @@ func Run(scenePath, mode string) error {
 	renderTimeLabel := widget.NewLabel("Render time: -")
 
 	// Выбранный объект
-	var selectedObjectIndex int = -1
+	selectedObjectIndex := -1
 
 	// Переменные для перетаскивания объектов
-	var isDragging bool = false
+	isDragging := false
 	var dragStartX, dragStartY int
 	var dragStartObjPos scene.Vec3
 
@@ -162,7 +170,7 @@ func Run(scenePath, mode string) error {
 	// Создаем pickable canvas для обработки кликов и перетаскивания
 	pickableCanvas := newPickableCanvas(imgCanvas, func(x, y int) {
 		// Выполняем raycast для определения объекта
-		cfg := engine.RenderConfig{
+		cfg := engine.Config{
 			Width:        previewSettings.Width,
 			Height:       previewSettings.Height,
 			SamplesPerPx: previewSettings.SamplesPerPx,
@@ -174,8 +182,8 @@ func Run(scenePath, mode string) error {
 		if objIndex >= 0 {
 			status.SetText(fmt.Sprintf("Selected object: %d", objIndex))
 			// Устанавливаем выбранный объект для подсветки
-			if engine.GetBackend() == engine.BackendGPU {
-				gpu.SetSelectedObjectFromUI(objIndex)
+			if renderService.GetBackend() == engine.BackendGPU {
+				renderService.SetSelectedObjectFromUI(objIndex)
 			}
 			// Сохраняем начальную позицию для перетаскивания
 			if objIndex < len(sc.Objects) {
@@ -188,8 +196,8 @@ func Run(scenePath, mode string) error {
 		} else {
 			status.SetText("No object selected")
 			// Снимаем выделение
-			if engine.GetBackend() == engine.BackendGPU {
-				gpu.SetSelectedObjectFromUI(-1)
+			if renderService.GetBackend() == engine.BackendGPU {
+				renderService.SetSelectedObjectFromUI(-1)
 			}
 			isDragging = false
 			startRender(false)
@@ -201,7 +209,7 @@ func Run(scenePath, mode string) error {
 		}
 
 		// Вычисляем смещение в 3D пространстве
-		cfg := engine.RenderConfig{
+		cfg := engine.Config{
 			Width:        previewSettings.Width,
 			Height:       previewSettings.Height,
 			SamplesPerPx: previewSettings.SamplesPerPx,
@@ -221,9 +229,9 @@ func Run(scenePath, mode string) error {
 		focusDist := sc.Camera.FocusDist
 		if focusDist == 0 {
 			focusDist = math.Sqrt(
-				math.Pow(sc.Camera.Position.X-sc.Camera.Target.X, 2) +
-					math.Pow(sc.Camera.Position.Y-sc.Camera.Target.Y, 2) +
-					math.Pow(sc.Camera.Position.Z-sc.Camera.Target.Z, 2),
+				(sc.Camera.Position.X-sc.Camera.Target.X)*(sc.Camera.Position.X-sc.Camera.Target.X) +
+					(sc.Camera.Position.Y-sc.Camera.Target.Y)*(sc.Camera.Position.Y-sc.Camera.Target.Y) +
+					(sc.Camera.Position.Z-sc.Camera.Target.Z)*(sc.Camera.Position.Z-sc.Camera.Target.Z),
 			)
 		}
 
@@ -300,18 +308,18 @@ func Run(scenePath, mode string) error {
 	})
 
 	var stopCh chan struct{}
-	var renderTimer *time.Timer             // для debounce при быстрых изменениях
-	var lastFinalImage image.Image          // последнее отрендеренное финальное изображение
-	var lastFinalConfig engine.RenderConfig // параметры последнего финального рендера
+	var renderTimer *time.Timer       // для debounce при быстрых изменениях
+	var lastFinalImage image.Image    // последнее отрендеренное финальное изображение
+	var lastFinalConfig engine.Config // параметры последнего финального рендера
 
 	// Настройка FPS для wireframe стримминга
 	wireframeFPS := 60.0
 
 	liveUpdate := widget.NewCheck("Live update while rendering", func(b bool) {
-		gpu.SetLivePreview(b)
+		renderService.SetLivePreview(b)
 	})
 	liveUpdate.SetChecked(true)
-	gpu.SetLivePreview(true)
+	renderService.SetLivePreview(true)
 
 	camControlActive := false
 	camControlCheck := widget.NewCheck("WASDQE camera control (preview)", func(b bool) {
@@ -334,18 +342,13 @@ func Run(scenePath, mode string) error {
 			log.Println("render goroutine started, final =", final)
 
 			// Проверяем, включен ли wireframe режим для стримминга
-			isWireframe := false
-			if engine.GetBackend() == engine.BackendGPU {
-				isWireframe = (gpu.GetRenderMode() == 1)
-			} else {
-				isWireframe = (engine.GetCPURenderMode() == 1)
-			}
+			isWireframe := isWireframeMode(renderService)
 
 			// Для wireframe режима используем стримминг вместо покадрового рендеринга
 			if isWireframe && !final {
 				// Стримминг режим для wireframe
 				uiDo(func() { status.SetText("Streaming wireframe...") })
-				cfg := engine.RenderConfig{
+				cfg := engine.Config{
 					Width:        previewSettings.Width,
 					Height:       previewSettings.Height,
 					SamplesPerPx: 1, // Для wireframe достаточно 1 сэмпла
@@ -360,8 +363,8 @@ func Run(scenePath, mode string) error {
 					img = image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
 					needCanvasBind = true
 					// Инициализируем темным серым (фон wireframe)
-					for y := 0; y < cfg.Height; y++ {
-						for x := 0; x < cfg.Width; x++ {
+					for y := range cfg.Height {
+						for x := range cfg.Width {
 							img.Set(x, y, color.RGBA{25, 25, 25, 255})
 						}
 					}
@@ -397,12 +400,7 @@ func Run(scenePath, mode string) error {
 
 						// Проверяем, что мы всё ещё в wireframe режиме
 						mu.Lock()
-						currentIsWireframe := false
-						if engine.GetBackend() == engine.BackendGPU {
-							currentIsWireframe = (gpu.GetRenderMode() == 1)
-						} else {
-							currentIsWireframe = (engine.GetCPURenderMode() == 1)
-						}
+						currentIsWireframe := isWireframeMode(renderService)
 						mu.Unlock()
 
 						// Если режим изменился, выходим из стримминга
@@ -420,7 +418,7 @@ func Run(scenePath, mode string) error {
 						renderImg := img
 						mu.Unlock()
 
-						engine.RenderInto(sc, cfg, renderImg, progress)
+						renderService.Into(sc, cfg, renderImg, progress)
 
 						publishPreview()
 
@@ -441,9 +439,9 @@ func Run(scenePath, mode string) error {
 			// Обычный покадровый рендеринг для normal режима или final рендеринга
 			uiDo(func() { status.SetText("Rendering...") })
 			startTime := time.Now()
-			var cfg engine.RenderConfig
+			var cfg engine.Config
 			if final {
-				cfg = engine.RenderConfig{
+				cfg = engine.Config{
 					Width:        finalSettings.Width,
 					Height:       finalSettings.Height,
 					SamplesPerPx: finalSettings.SamplesPerPx,
@@ -451,7 +449,7 @@ func Run(scenePath, mode string) error {
 					MaxRayDist:   float32(finalSettings.MaxRayDist),
 				}
 			} else {
-				cfg = engine.RenderConfig{
+				cfg = engine.Config{
 					Width:        previewSettings.Width,
 					Height:       previewSettings.Height,
 					SamplesPerPx: previewSettings.SamplesPerPx,
@@ -469,18 +467,18 @@ func Run(scenePath, mode string) error {
 			}
 			// Для wireframe режима не очищаем изображение, чтобы избежать мерцания
 			shouldClearImage := true
-			if engine.GetBackend() == engine.BackendGPU {
-				if gpu.GetRenderMode() == 1 {
+			if renderService.GetBackend() == engine.BackendGPU {
+				if renderService.GetRenderMode() == 1 {
 					shouldClearImage = false
 				}
 			} else {
-				if engine.GetCPURenderMode() == 1 {
+				if renderService.GetCPURenderMode() == 1 {
 					shouldClearImage = false
 				}
 			}
 			if shouldClearImage {
-				for y := 0; y < cfg.Height; y++ {
-					for x := 0; x < cfg.Width; x++ {
+				for y := range cfg.Height {
+					for x := range cfg.Width {
 						img.Set(x, y, color.RGBA{0, 0, 0, 255})
 					}
 				}
@@ -489,11 +487,6 @@ func Run(scenePath, mode string) error {
 			mu.Unlock()
 			if needCanvasBind {
 				uiDo(func() { imgCanvas.Image = bindImg })
-			}
-
-			totalSamples := cfg.SamplesPerPx
-			if totalSamples < 1 {
-				totalSamples = 1
 			}
 
 			uiDo(func() {
@@ -511,8 +504,8 @@ func Run(scenePath, mode string) error {
 				progress = func(currentSample, totalSamples int) {
 					select {
 					case <-stopCh:
-						if engine.GetBackend() == engine.BackendGPU {
-							gpu.SetRenderCancel(true)
+						if renderService.GetBackend() == engine.BackendGPU {
+							renderService.SetRenderCancel(true)
 						}
 						return
 					default:
@@ -554,8 +547,8 @@ func Run(scenePath, mode string) error {
 				progress = func(currentSample, totalSamples int) {
 					select {
 					case <-stopCh:
-						if engine.GetBackend() == engine.BackendGPU {
-							gpu.SetRenderCancel(true)
+						if renderService.GetBackend() == engine.BackendGPU {
+							renderService.SetRenderCancel(true)
 						}
 						return
 					default:
@@ -591,14 +584,14 @@ func Run(scenePath, mode string) error {
 				}
 			}
 
-			if engine.GetBackend() == engine.BackendGPU {
-				gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
-				gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
-				gpu.SetLivePreview(live)
-				gpu.SetRenderCancel(false)
+			if renderService.GetBackend() == engine.BackendGPU {
+				renderService.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+				renderService.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+				renderService.SetLivePreview(live)
+				renderService.SetRenderCancel(false)
 			}
 
-			engine.RenderInto(sc, cfg, img, progress)
+			renderService.Into(sc, cfg, img, progress)
 
 			select {
 			case <-stopCh:
@@ -679,13 +672,13 @@ func Run(scenePath, mode string) error {
 	backendSlider.OnChanged = func(v float64) {
 		if v >= 0.5 {
 			backendLabel.SetText("Backend: GPU")
-			engine.SetBackend(engine.BackendGPU)
+			renderService.SetBackend(engine.BackendGPU)
 			// При переключении на GPU сразу применяем текущие настройки денойзера.
-			gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
-			gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+			renderService.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+			renderService.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
 		} else {
 			backendLabel.SetText("Backend: CPU")
-			engine.SetBackend(engine.BackendCPU)
+			renderService.SetBackend(engine.BackendCPU)
 		}
 		startRender(false)
 	}
@@ -713,9 +706,9 @@ func Run(scenePath, mode string) error {
 	if cam.FocusDist == 0 {
 		// Если focus_dist не задан, вычисляем автоматически
 		dist := math.Sqrt(
-			math.Pow(cam.Position.X-cam.Target.X, 2) +
-				math.Pow(cam.Position.Y-cam.Target.Y, 2) +
-				math.Pow(cam.Position.Z-cam.Target.Z, 2),
+			(cam.Position.X-cam.Target.X)*(cam.Position.X-cam.Target.X) +
+				(cam.Position.Y-cam.Target.Y)*(cam.Position.Y-cam.Target.Y) +
+				(cam.Position.Z-cam.Target.Z)*(cam.Position.Z-cam.Target.Z),
 		)
 		camFocusDist.SetText(fmt.Sprintf("%.2f", dist))
 	} else {
@@ -875,7 +868,7 @@ func Run(scenePath, mode string) error {
 		}
 
 		// Get render settings (use final settings for video)
-		cfg := engine.RenderConfig{
+		cfg := engine.Config{
 			Width:        finalSettings.Width,
 			Height:       finalSettings.Height,
 			SamplesPerPx: finalSettings.SamplesPerPx,
@@ -935,7 +928,7 @@ func Run(scenePath, mode string) error {
 				})
 			}
 
-			frames, err := engine.RenderVideoSequence(
+			frames, err := renderService.VideoSequence(
 				sc, startCam, endCam, duration, fps, cfg, progress,
 			)
 			if err != nil {
@@ -962,7 +955,7 @@ func Run(scenePath, mode string) error {
 				return
 			}
 
-			doneMsg := fmt.Sprintf("Video saved to %s", outputPath)
+			doneMsg := "Video saved to " + outputPath
 			uiDo(func() {
 				renderProgressBar.SetValue(1.0)
 				status.SetText(doneMsg)
@@ -1007,7 +1000,7 @@ func Run(scenePath, mode string) error {
 		materialIDs = append(materialIDs, m.ID)
 	}
 
-	var selectedMat int = -1
+	selectedMat := -1
 
 	matList := widget.NewList(
 		func() int { return len(sc.Materials) },
@@ -1017,7 +1010,11 @@ func Run(scenePath, mode string) error {
 				return
 			}
 			m := sc.Materials[i]
-			o.(*widget.Label).SetText(fmt.Sprintf("%s (%s)", m.ID, m.Type))
+			label, ok := o.(*widget.Label)
+			if !ok {
+				return
+			}
+			label.SetText(fmt.Sprintf("%s (%s)", m.ID, m.Type))
 		},
 	)
 
@@ -1177,7 +1174,7 @@ func Run(scenePath, mode string) error {
 	}
 
 	matList.OnSelected = func(id widget.ListItemID) {
-		selectedMat = int(id)
+		selectedMat = id
 		loadMaterialToForm(selectedMat)
 	}
 
@@ -1279,7 +1276,7 @@ func Run(scenePath, mode string) error {
 		applyMaterial,
 	)
 	// --- Управление объектами сцены ---
-	var selectedObj int = -1
+	selectedObj := -1
 
 	objList := widget.NewList(
 		func() int { return len(sc.Objects) },
@@ -1289,7 +1286,11 @@ func Run(scenePath, mode string) error {
 				return
 			}
 			obj := sc.Objects[i]
-			o.(*widget.Label).SetText(fmt.Sprintf("%s (%s)", obj.ID, obj.Type))
+			label, ok := o.(*widget.Label)
+			if !ok {
+				return
+			}
+			label.SetText(fmt.Sprintf("%s (%s)", obj.ID, obj.Type))
 		},
 	)
 
@@ -1352,7 +1353,7 @@ func Run(scenePath, mode string) error {
 	}
 
 	objList.OnSelected = func(id widget.ListItemID) {
-		selectedObj = int(id)
+		selectedObj = id
 		loadObjectToForm(selectedObj)
 	}
 
@@ -1405,7 +1406,7 @@ func Run(scenePath, mode string) error {
 		sc.Objects = append(sc.Objects, o)
 		objList.Refresh()
 		selectedObj = len(sc.Objects) - 1
-		objList.Select(widget.ListItemID(selectedObj))
+		objList.Select(selectedObj)
 		clearFinalImage() // очищаем сохранённое финальное изображение при добавлении объекта
 		status.SetText("Sphere added")
 		startRender(false)
@@ -1428,7 +1429,7 @@ func Run(scenePath, mode string) error {
 		sc.Objects = append(sc.Objects, o)
 		objList.Refresh()
 		selectedObj = len(sc.Objects) - 1
-		objList.Select(widget.ListItemID(selectedObj))
+		objList.Select(selectedObj)
 		clearFinalImage() // очищаем сохранённое финальное изображение при добавлении объекта
 		status.SetText("Box added")
 		startRender(false)
@@ -1697,10 +1698,7 @@ func Run(scenePath, mode string) error {
 			if noiseScale <= 0 {
 				noiseScale = 3.0
 			}
-			noiseOct := parseI(fogNoiseOctavesEntry, 3)
-			if noiseOct < 1 {
-				noiseOct = 1
-			}
+			noiseOct := max(parseI(fogNoiseOctavesEntry, 3), 1)
 			if noiseOct > 5 {
 				noiseOct = 5
 			}
@@ -1737,8 +1735,8 @@ func Run(scenePath, mode string) error {
 			stopCh = nil
 		}
 		img = image.NewRGBA(image.Rect(0, 0, previewSettings.Width, previewSettings.Height))
-		for y := 0; y < previewSettings.Height; y++ {
-			for x := 0; x < previewSettings.Width; x++ {
+		for y := range previewSettings.Height {
+			for x := range previewSettings.Width {
 				img.Set(x, y, color.RGBA{0, 0, 0, 255})
 			}
 		}
@@ -1808,7 +1806,8 @@ func Run(scenePath, mode string) error {
 	outputPath.SetText("ui_render.png")
 
 	saveBtn := widget.NewButton("Save scene", func() {
-		if err := scene.Save(scenePath, sc); err != nil {
+		err := scenes.Save(scenePath, sc)
+		if err != nil {
 			status.SetText(fmt.Sprintf("Save error: %v", err))
 		} else {
 			status.SetText("Scene saved")
@@ -1834,7 +1833,8 @@ func Run(scenePath, mode string) error {
 		// Сохраняем уже отрендеренное изображение без перерендеринга
 		uiDo(func() { status.SetText("Saving image...") })
 		go func() {
-			if err := engine.SavePNG(path, savedImg); err != nil {
+			err := engine.SavePNG(path, savedImg)
+			if err != nil {
 				msg := fmt.Sprintf("Save image error: %v", err)
 				uiDo(func() { status.SetText(msg) })
 			} else {
@@ -1848,8 +1848,8 @@ func Run(scenePath, mode string) error {
 	// --- GPU denoise controls (видны и полезны в режиме GPU) ---
 	denoiseCheck := widget.NewCheck("GPU denoise (bilateral 3x3)", func(b bool) {
 		denoiseEnabled = b
-		if engine.GetBackend() == engine.BackendGPU {
-			gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+		if renderService.GetBackend() == engine.BackendGPU {
+			renderService.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
 			startRender(false)
 		}
 	})
@@ -1870,8 +1870,8 @@ func Run(scenePath, mode string) error {
 		}
 		denoiseSigmaS = parseF(denoiseSigmaSEntry, denoiseSigmaS)
 		denoiseSigmaR = parseF(denoiseSigmaREntry, denoiseSigmaR)
-		if engine.GetBackend() == engine.BackendGPU {
-			gpu.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
+		if renderService.GetBackend() == engine.BackendGPU {
+			renderService.SetDenoiseConfigFromUI(denoiseEnabled, denoiseSigmaS, denoiseSigmaR)
 			startRender(false)
 		}
 	})
@@ -1890,8 +1890,8 @@ func Run(scenePath, mode string) error {
 	// Дополнительный фильтр сглаживания (сильный blur).
 	smoothCheck := widget.NewCheck("GPU extra smoothing (strong blur)", func(b bool) {
 		smoothEnabled = b
-		if engine.GetBackend() == engine.BackendGPU {
-			gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+		if renderService.GetBackend() == engine.BackendGPU {
+			renderService.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
 			startRender(false)
 		}
 	})
@@ -1917,10 +1917,7 @@ func Run(scenePath, mode string) error {
 			}
 			return v
 		}
-		smoothRadius = parseI(smoothRadiusEntry, smoothRadius)
-		if smoothRadius < 1 {
-			smoothRadius = 1
-		}
+		smoothRadius = max(parseI(smoothRadiusEntry, smoothRadius), 1)
 		if smoothRadius > 5 {
 			smoothRadius = 5
 		}
@@ -1932,8 +1929,8 @@ func Run(scenePath, mode string) error {
 			smoothStrength = 1
 		}
 
-		if engine.GetBackend() == engine.BackendGPU {
-			gpu.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
+		if renderService.GetBackend() == engine.BackendGPU {
+			renderService.SetSmoothConfigFromUI(smoothEnabled, smoothRadius, smoothStrength)
 			startRender(false)
 		}
 	})
@@ -1986,10 +1983,10 @@ func Run(scenePath, mode string) error {
 		if selected == "Wireframe" {
 			mode = 1
 		}
-		if engine.GetBackend() == engine.BackendGPU {
-			gpu.SetRenderModeFromUI(mode)
+		if renderService.GetBackend() == engine.BackendGPU {
+			renderService.SetRenderModeFromUI(mode)
 		} else {
-			engine.SetCPURenderMode(mode)
+			renderService.SetCPURenderMode(mode)
 		}
 		startRender(false)
 	})
@@ -2036,7 +2033,7 @@ func Run(scenePath, mode string) error {
 	// Основная структура: левая панель | центральный viewport | правая панель
 	// Используем Border для создания трехколоночного layout
 	centerWithRight := container.NewHSplit(
-		container.NewMax(pickableCanvas), // Центральный viewport с поддержкой кликов
+		container.NewStack(pickableCanvas), // Центральный viewport с поддержкой кликов
 		rightPanel,
 	)
 	centerWithRight.SetOffset(0.70) // Правая панель занимает 30% (увеличено для удобства)
@@ -2084,211 +2081,204 @@ func Run(scenePath, mode string) error {
 	cameraUpdateTicker := time.NewTicker(16 * time.Millisecond) // ~60 FPS для плавного движения
 	go func() {
 		defer cameraUpdateTicker.Stop()
-		for {
-			select {
-			case <-cameraUpdateTicker.C:
-				if !camControlActive {
-					continue
-				}
+		for range cameraUpdateTicker.C {
+			if !camControlActive {
+				continue
+			}
 
-				// Проверяем, какие клавиши всё ещё нажаты (автоматически отпускаем, если не нажаты в течение keyTimeout)
-				now := time.Now()
-				keysMutex.Lock()
-				for key, lastTime := range keysLastPressed {
-					if now.Sub(lastTime) > keyTimeout {
-						keysPressed[key] = false
-					}
+			// Проверяем, какие клавиши всё ещё нажаты (автоматически
+			// отпускаем, если не нажаты в течение keyTimeout)
+			now := time.Now()
+			keysMutex.Lock()
+			for key, lastTime := range keysLastPressed {
+				if now.Sub(lastTime) > keyTimeout {
+					keysPressed[key] = false
 				}
-				keysMutex.Unlock()
+			}
+			keysMutex.Unlock()
 
+			mu.Lock()
+			anyKeyPressed := false
+			changed := false
+			rotated := false
+
+			// Вычисляем направление камеры
+			dirX := cam.Target.X - cam.Position.X
+			dirY := cam.Target.Y - cam.Position.Y
+			dirZ := cam.Target.Z - cam.Position.Z
+			dirLen := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
+			if dirLen < 1e-6 {
+				mu.Unlock()
+				continue
+			}
+
+			// Нормализуем направление
+			dirX /= dirLen
+			dirY /= dirLen
+			dirZ /= dirLen
+
+			// Вычисляем базис камеры вручную
+			upX, upY, upZ := cam.Up.X, cam.Up.Y, cam.Up.Z
+			// u = normalize(cross(up, w))
+			uX := upY*dirZ - upZ*dirY
+			uY := upZ*dirX - upX*dirZ
+			uZ := upX*dirY - upY*dirX
+			uLen := math.Sqrt(uX*uX + uY*uY + uZ*uZ)
+			if uLen > 1e-6 {
+				uX /= uLen
+				uY /= uLen
+				uZ /= uLen
+			}
+
+			// Вычисляем углы для поворота
+			yaw := math.Atan2(dirZ, dirX)
+			pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
+
+			// Движение вперед/назад (W/S)
+			dt := 16.0 / 1000.0 // 16ms в секундах
+			moveStep := cameraMoveSpeed * dt
+
+			// Читаем состояние всех клавиш под блокировкой
+			keysMutex.RLock()
+			keyW := keysPressed[fyne.KeyW]
+			keyS := keysPressed[fyne.KeyS]
+			keyA := keysPressed[fyne.KeyA]
+			keyD := keysPressed[fyne.KeyD]
+			keyQ := keysPressed[fyne.KeyQ]
+			keyE := keysPressed[fyne.KeyE]
+			keyLeft := keysPressed[fyne.KeyLeft]
+			keyRight := keysPressed[fyne.KeyRight]
+			keyUp := keysPressed[fyne.KeyUp]
+			keyDown := keysPressed[fyne.KeyDown]
+			keysMutex.RUnlock()
+
+			if keyW {
+				// Движение вперед по направлению камеры
+				cam.Position.X += dirX * moveStep
+				cam.Position.Y += dirY * moveStep
+				cam.Position.Z += dirZ * moveStep
+				cam.Target.X += dirX * moveStep
+				cam.Target.Y += dirY * moveStep
+				cam.Target.Z += dirZ * moveStep
+				changed = true
+				anyKeyPressed = true
+			}
+			if keyS {
+				// Движение назад
+				cam.Position.X -= dirX * moveStep
+				cam.Position.Y -= dirY * moveStep
+				cam.Position.Z -= dirZ * moveStep
+				cam.Target.X -= dirX * moveStep
+				cam.Target.Y -= dirY * moveStep
+				cam.Target.Z -= dirZ * moveStep
+				changed = true
+				anyKeyPressed = true
+			}
+
+			// Движение влево/вправо (A/D)
+			if keyA {
+				// Движение влево (перпендикулярно направлению)
+				cam.Position.X -= uX * moveStep
+				cam.Position.Y -= uY * moveStep
+				cam.Position.Z -= uZ * moveStep
+				cam.Target.X -= uX * moveStep
+				cam.Target.Y -= uY * moveStep
+				cam.Target.Z -= uZ * moveStep
+				changed = true
+				anyKeyPressed = true
+			}
+			if keyD {
+				// Движение вправо
+				cam.Position.X += uX * moveStep
+				cam.Position.Y += uY * moveStep
+				cam.Position.Z += uZ * moveStep
+				cam.Target.X += uX * moveStep
+				cam.Target.Y += uY * moveStep
+				cam.Target.Z += uZ * moveStep
+				changed = true
+				anyKeyPressed = true
+			}
+
+			// Движение вверх/вниз (Q/E)
+			if keyQ {
+				// Движение вниз
+				cam.Position.Y -= moveStep
+				cam.Target.Y -= moveStep
+				changed = true
+				anyKeyPressed = true
+			}
+			if keyE {
+				// Движение вверх
+				cam.Position.Y += moveStep
+				cam.Target.Y += moveStep
+				changed = true
+				anyKeyPressed = true
+			}
+
+			// Поворот камеры (стрелки)
+			rotStep := cameraRotSpeed * dt
+			if keyLeft {
+				yaw -= rotStep
+				rotated = true
+				anyKeyPressed = true
+			}
+			if keyRight {
+				yaw += rotStep
+				rotated = true
+				anyKeyPressed = true
+			}
+			if keyUp {
+				pitch -= rotStep // Инвертировано: Up = вверх = уменьшаем pitch
+				if pitch < -math.Pi/2+0.1 {
+					pitch = -math.Pi/2 + 0.1
+				}
+				rotated = true
+				anyKeyPressed = true
+			}
+			if keyDown {
+				pitch += rotStep // Инвертировано: Down = вниз = увеличиваем pitch
+				if pitch > math.Pi/2-0.1 {
+					pitch = math.Pi/2 - 0.1
+				}
+				rotated = true
+				anyKeyPressed = true
+			}
+
+			// Применяем поворот камеры
+			if rotated {
+				r := dirLen
+				newDirX := r * math.Cos(pitch) * math.Cos(yaw)
+				newDirY := r * math.Sin(pitch)
+				newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
+				cam.Target.X = cam.Position.X + newDirX
+				cam.Target.Y = cam.Position.Y + newDirY
+				cam.Target.Z = cam.Position.Z + newDirZ
+			}
+
+			mu.Unlock()
+
+			// Обновляем камеру и UI только если что-то изменилось
+			if anyKeyPressed && (changed || rotated) {
 				mu.Lock()
-				anyKeyPressed := false
-				changed := false
-				rotated := false
-
-				// Вычисляем направление камеры
-				dirX := cam.Target.X - cam.Position.X
-				dirY := cam.Target.Y - cam.Position.Y
-				dirZ := cam.Target.Z - cam.Position.Z
-				dirLen := math.Sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ)
-				if dirLen < 1e-6 {
-					mu.Unlock()
-					continue
-				}
-
-				// Нормализуем направление
-				dirX /= dirLen
-				dirY /= dirLen
-				dirZ /= dirLen
-
-				// Вычисляем базис камеры вручную
-				upX, upY, upZ := cam.Up.X, cam.Up.Y, cam.Up.Z
-				// u = normalize(cross(up, w))
-				uX := upY*dirZ - upZ*dirY
-				uY := upZ*dirX - upX*dirZ
-				uZ := upX*dirY - upY*dirX
-				uLen := math.Sqrt(uX*uX + uY*uY + uZ*uZ)
-				if uLen > 1e-6 {
-					uX /= uLen
-					uY /= uLen
-					uZ /= uLen
-				}
-
-				// Вычисляем углы для поворота
-				yaw := math.Atan2(dirZ, dirX)
-				pitch := math.Atan2(dirY, math.Hypot(dirX, dirZ))
-
-				// Движение вперед/назад (W/S)
-				dt := 16.0 / 1000.0 // 16ms в секундах
-				moveStep := cameraMoveSpeed * dt
-
-				// Читаем состояние всех клавиш под блокировкой
-				keysMutex.RLock()
-				keyW := keysPressed[fyne.KeyW]
-				keyS := keysPressed[fyne.KeyS]
-				keyA := keysPressed[fyne.KeyA]
-				keyD := keysPressed[fyne.KeyD]
-				keyQ := keysPressed[fyne.KeyQ]
-				keyE := keysPressed[fyne.KeyE]
-				keyLeft := keysPressed[fyne.KeyLeft]
-				keyRight := keysPressed[fyne.KeyRight]
-				keyUp := keysPressed[fyne.KeyUp]
-				keyDown := keysPressed[fyne.KeyDown]
-				keysMutex.RUnlock()
-
-				if keyW {
-					// Движение вперед по направлению камеры
-					cam.Position.X += dirX * moveStep
-					cam.Position.Y += dirY * moveStep
-					cam.Position.Z += dirZ * moveStep
-					cam.Target.X += dirX * moveStep
-					cam.Target.Y += dirY * moveStep
-					cam.Target.Z += dirZ * moveStep
-					changed = true
-					anyKeyPressed = true
-				}
-				if keyS {
-					// Движение назад
-					cam.Position.X -= dirX * moveStep
-					cam.Position.Y -= dirY * moveStep
-					cam.Position.Z -= dirZ * moveStep
-					cam.Target.X -= dirX * moveStep
-					cam.Target.Y -= dirY * moveStep
-					cam.Target.Z -= dirZ * moveStep
-					changed = true
-					anyKeyPressed = true
-				}
-
-				// Движение влево/вправо (A/D)
-				if keyA {
-					// Движение влево (перпендикулярно направлению)
-					cam.Position.X -= uX * moveStep
-					cam.Position.Y -= uY * moveStep
-					cam.Position.Z -= uZ * moveStep
-					cam.Target.X -= uX * moveStep
-					cam.Target.Y -= uY * moveStep
-					cam.Target.Z -= uZ * moveStep
-					changed = true
-					anyKeyPressed = true
-				}
-				if keyD {
-					// Движение вправо
-					cam.Position.X += uX * moveStep
-					cam.Position.Y += uY * moveStep
-					cam.Position.Z += uZ * moveStep
-					cam.Target.X += uX * moveStep
-					cam.Target.Y += uY * moveStep
-					cam.Target.Z += uZ * moveStep
-					changed = true
-					anyKeyPressed = true
-				}
-
-				// Движение вверх/вниз (Q/E)
-				if keyQ {
-					// Движение вниз
-					cam.Position.Y -= moveStep
-					cam.Target.Y -= moveStep
-					changed = true
-					anyKeyPressed = true
-				}
-				if keyE {
-					// Движение вверх
-					cam.Position.Y += moveStep
-					cam.Target.Y += moveStep
-					changed = true
-					anyKeyPressed = true
-				}
-
-				// Поворот камеры (стрелки)
-				rotStep := cameraRotSpeed * dt
-				if keyLeft {
-					yaw -= rotStep
-					rotated = true
-					anyKeyPressed = true
-				}
-				if keyRight {
-					yaw += rotStep
-					rotated = true
-					anyKeyPressed = true
-				}
-				if keyUp {
-					pitch -= rotStep // Инвертировано: Up = вверх = уменьшаем pitch
-					if pitch < -math.Pi/2+0.1 {
-						pitch = -math.Pi/2 + 0.1
-					}
-					rotated = true
-					anyKeyPressed = true
-				}
-				if keyDown {
-					pitch += rotStep // Инвертировано: Down = вниз = увеличиваем pitch
-					if pitch > math.Pi/2-0.1 {
-						pitch = math.Pi/2 - 0.1
-					}
-					rotated = true
-					anyKeyPressed = true
-				}
-
-				// Применяем поворот камеры
-				if rotated {
-					r := dirLen
-					newDirX := r * math.Cos(pitch) * math.Cos(yaw)
-					newDirY := r * math.Sin(pitch)
-					newDirZ := r * math.Cos(pitch) * math.Sin(yaw)
-					cam.Target.X = cam.Position.X + newDirX
-					cam.Target.Y = cam.Position.Y + newDirY
-					cam.Target.Z = cam.Position.Z + newDirZ
-				}
-
+				sc.Camera = cam
+				camPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
+				camPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
+				camPosZ.SetText(fmt.Sprintf("%.2f", cam.Position.Z))
+				camLookX.SetText(fmt.Sprintf("%.2f", cam.Target.X))
+				camLookY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
+				camLookZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
 				mu.Unlock()
 
-				// Обновляем камеру и UI только если что-то изменилось
-				if anyKeyPressed && (changed || rotated) {
-					mu.Lock()
-					sc.Camera = cam
-					camPosX.SetText(fmt.Sprintf("%.2f", cam.Position.X))
-					camPosY.SetText(fmt.Sprintf("%.2f", cam.Position.Y))
-					camPosZ.SetText(fmt.Sprintf("%.2f", cam.Position.Z))
-					camLookX.SetText(fmt.Sprintf("%.2f", cam.Target.X))
-					camLookY.SetText(fmt.Sprintf("%.2f", cam.Target.Y))
-					camLookZ.SetText(fmt.Sprintf("%.2f", cam.Target.Z))
-					mu.Unlock()
+				// Запускаем рендер с debounce только один раз после движения
+				// startRender уже имеет debounce, поэтому не нужно вызывать его каждый кадр
+				// Вызываем только если это не wireframe режим (wireframe стримит сам)
+				mu.Lock()
+				isWireframe := isWireframeMode(renderService)
+				mu.Unlock()
 
-					// Запускаем рендер с debounce только один раз после движения
-					// startRender уже имеет debounce, поэтому не нужно вызывать его каждый кадр
-					// Вызываем только если это не wireframe режим (wireframe стримит сам)
-					mu.Lock()
-					isWireframe := false
-					if engine.GetBackend() == engine.BackendGPU {
-						isWireframe = (gpu.GetRenderMode() == 1)
-					} else {
-						isWireframe = (engine.GetCPURenderMode() == 1)
-					}
-					mu.Unlock()
-
-					// Для normal режима запускаем рендер с debounce
-					if !isWireframe {
-						startRender(false)
-					}
+				// Для normal режима запускаем рендер с debounce
+				if !isWireframe {
+					startRender(false)
 				}
 			}
 		}

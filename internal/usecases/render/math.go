@@ -1,4 +1,4 @@
-package engine
+package render
 
 import "math"
 
@@ -82,10 +82,6 @@ func randomInUnitSphere(rng *randSource) vec3 {
 		}
 		return vec3{x: x, y: y, z: z}
 	}
-}
-
-func randomUnitVector(rng *randSource) vec3 {
-	return randomInUnitSphere(rng).unit()
 }
 
 // randomCosineDirection generates a random direction on the hemisphere

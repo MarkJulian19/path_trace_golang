@@ -1,40 +1,63 @@
-package scene
+package scenejson
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+
+	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
 
-// Load reads a Scene from a JSON file.
-func Load(path string) (*Scene, error) {
-	f, err := os.Open(path)
+// Repository сохраняет сцены в JSON-файлах.
+type Repository struct{}
+
+// New создаёт хранилище сцен на основе JSON-файлов.
+func New() Repository {
+	return Repository{}
+}
+
+// Load читает сцену из JSON-файла.
+func (Repository) Load(path string) (result *scene.Scene, err error) {
+	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return nil, fmt.Errorf("open scene: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		closeErr := f.Close()
+		if closeErr != nil && err == nil {
+			err = fmt.Errorf("close scene: %w", closeErr)
+		}
+	}()
 
-	var sc Scene
-	if err := json.NewDecoder(f).Decode(&sc); err != nil {
+	var fileScene sceneFile
+	err = json.NewDecoder(f).Decode(&fileScene)
+	if err != nil {
 		return nil, fmt.Errorf("decode scene: %w", err)
 	}
-	return &sc, nil
+
+	return toEntity(fileScene), nil
 }
 
-// Save writes a Scene to a JSON file.
-func Save(path string, sc *Scene) error {
-	f, err := os.Create(path)
+// Save записывает сцену в JSON-файл.
+func (Repository) Save(path string, sc *scene.Scene) (err error) {
+	f, err := os.Create(filepath.Clean(path))
 	if err != nil {
 		return fmt.Errorf("create scene: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		closeErr := f.Close()
+		if closeErr != nil && err == nil {
+			err = fmt.Errorf("close scene: %w", closeErr)
+		}
+	}()
 
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(sc); err != nil {
+	err = enc.Encode(fromEntity(sc))
+	if err != nil {
 		return fmt.Errorf("encode scene: %w", err)
 	}
+
 	return nil
 }
-
-// (Rendering helpers moved to engine package to avoid import cycle)
