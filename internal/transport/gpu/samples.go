@@ -2,11 +2,17 @@ package gpu
 
 import (
 	"image"
+	"math"
 	"time"
 
 	"github.com/go-gl/gl/v3.3-core/gl"
 
 	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
+)
+
+const (
+	gpuInitialDispatchTileSize = 64
+	gpuDispatchBudget          = 8 * time.Millisecond
 )
 
 type gpuSampleRequest struct {
@@ -19,6 +25,9 @@ type gpuSampleRequest struct {
 
 	pixelCount     int
 	passes         int
+	batchSize      int
+	totalSamples   int
+	frameSeed      uint32
 	updateInterval int
 
 	locSpp            int32
@@ -46,12 +55,23 @@ func newGPUSampleRequest(
 	state gpuFrameState, cfg renderentity.Config, img *image.RGBA,
 	progress func(int, int), cancelled func() bool,
 ) gpuSampleRequest {
+	frameSeed := glSeed(time.Now().UnixNano())
+	if cfg.Seed != 0 {
+		frameSeed = glSeed(int64(cfg.Seed & math.MaxInt64))
+	}
+	batch, total := state.batchSize, max(cfg.SamplesPerPx, 1)
+	if state.isWireframe {
+		batch, total = 1, 1
+	}
 	return gpuSampleRequest{
 		cfg:               configForSamples{width: cfg.Width, height: cfg.Height},
 		img:               img,
 		tmp:               state.tmp,
 		pixelCount:        state.pixelCount,
 		passes:            state.passes,
+		batchSize:         batch,
+		totalSamples:      total,
+		frameSeed:         frameSeed,
 		updateInterval:    state.updateInterval,
 		isWireframe:       state.isWireframe,
 		wantLiveReadback:  state.wantLiveReadback,
@@ -116,7 +136,7 @@ func (r *gpuRenderer) finishSample(request gpuSampleRequest, sample int, stats *
 		r.swapTemporalTargets()
 	}
 	if request.progress != nil {
-		request.progress(sample+1, request.passes)
+		request.progress(min((sample+1)*request.batchSize, request.totalSamples), request.totalSamples)
 	}
 	if sampleCancelled(request) {
 		gpuLogf("cancelled after sample %d/%d", sample+1, request.passes)
@@ -135,7 +155,7 @@ func (r *gpuRenderer) swapTemporalTargets() {
 			gl.TEXTURE_FETCH_BARRIER_BIT,
 	)
 	r.imgTexture, r.prevFrameTexture = r.prevFrameTexture, r.imgTexture
-	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA16F)
+	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA32F)
 	gl.ActiveTexture(gl.TEXTURE9)
 	gl.BindTexture(gl.TEXTURE_2D, r.prevFrameTexture)
 }
@@ -146,9 +166,10 @@ func (r *gpuRenderer) dispatchSample(request gpuSampleRequest, sample int) time.
 		gl.Uniform1i(request.locSampleCount, 1)
 		gl.Uniform1ui(request.locSeed, glSeed(time.Now().UnixNano()))
 	} else {
-		gl.Uniform1i(request.locSpp, glInt32(samplesPerPass()))
-		gl.Uniform1i(request.locSampleCount, glInt32(sample+1))
-		gl.Uniform1ui(request.locSeed, glSeed(time.Now().UnixNano()+int64(sample)))
+		count := min(request.batchSize, request.totalSamples-sample*request.batchSize)
+		gl.Uniform1i(request.locSpp, glInt32(count))
+		gl.Uniform1i(request.locSampleCount, glInt32(sample*request.batchSize+count))
+		gl.Uniform1ui(request.locSeed, request.frameSeed)
 	}
 	gl.Uniform1i(request.locObject, glInt32(GetSelectedObject()))
 	start := time.Now()
@@ -156,26 +177,86 @@ func (r *gpuRenderer) dispatchSample(request gpuSampleRequest, sample int) time.
 	if request.isWireframe {
 		workgroupSize = gpuWireframeWorkgroupSize
 	}
-	tileSize := dispatchTileSize()
-	for y := 0; y < request.cfg.height; y += tileSize {
-		for x := 0; x < request.cfg.width; x += tileSize {
-			if sampleCancelled(request) {
-				break
-			}
-			gl.Uniform2i(request.locDispatchOffset, glInt32(x), glInt32(y))
-			groupsX := dispatchGroups(min(tileSize, request.cfg.width-x), workgroupSize)
-			groupsY := dispatchGroups(min(tileSize, request.cfg.height-y), workgroupSize)
-			gl.DispatchCompute(glUint32(groupsX), glUint32(groupsY), 1)
-		}
-		if sampleCancelled(request) {
-			break
-		}
-	}
+	r.dispatchTiles(request, workgroupSize, sample)
 	gl.MemoryBarrier(gl.SHADER_IMAGE_ACCESS_BARRIER_BIT | gl.SHADER_STORAGE_BARRIER_BIT)
 	if !gpuDebugEnabled() {
 		return 0
 	}
 	return time.Since(start)
+}
+
+// dispatchTiles меняет размер следующих плиток по фактическому времени GPU.
+// Высота строки сохраняется до её конца, поэтому изменение ширины не создаёт пропусков.
+func (r *gpuRenderer) dispatchTiles(request gpuSampleRequest, workgroupSize, sample int) {
+	lastProgress := time.Now()
+	limit := dispatchTileSize()
+	for y := 0; y < request.cfg.height; {
+		rowHeight := min(r.dispatchTile, request.cfg.height-y)
+		for x := 0; x < request.cfg.width; {
+			if sampleCancelled(request) {
+				break
+			}
+			width := min(r.dispatchTile, request.cfg.width-x)
+			gl.Uniform2i(request.locDispatchOffset, glInt32(x), glInt32(y))
+			groupsX := dispatchGroups(width, workgroupSize)
+			groupsY := dispatchGroups(rowHeight, workgroupSize)
+			started := time.Now()
+			gl.DispatchCompute(glUint32(groupsX), glUint32(groupsY), 1)
+			// В очереди остаётся только одна плитка: UI и оконный композитор
+			// получают GPU между короткими порциями трассировки. Ожидает GL-поток.
+			waitDispatch()
+			r.dispatchTile = nextDispatchTileSize(r.dispatchTile, width*rowHeight, limit, time.Since(started))
+			x += width
+			// Сообщаем о времени и отмене даже внутри долгого прохода. В img
+			// пока остаётся последний полностью прочитанный кадр.
+			const progressInterval = 100 * time.Millisecond
+			if request.progress != nil && time.Since(lastProgress) >= progressInterval {
+				request.progress(sample*request.batchSize, request.totalSamples)
+				lastProgress = time.Now()
+			}
+		}
+		if sampleCancelled(request) {
+			break
+		}
+		y += rowHeight
+	}
+}
+
+// nextDispatchTileSize сохраняет короткие команды, позволяя быстрым GPU заполнить свои SM.
+func nextDispatchTileSize(current, pixels, limit int, elapsed time.Duration) int {
+	next := current
+	if elapsed > gpuDispatchBudget {
+		next = int(math.Sqrt(float64(pixels) * float64(gpuDispatchBudget) / float64(elapsed)))
+	} else if elapsed < gpuDispatchBudget/2 && pixels >= current*current {
+		next *= 2
+	}
+	return min(limit, max(gpuDispatchTileSizeMin, next/gpuWorkgroupSize*gpuWorkgroupSize))
+}
+
+// waitDispatch ограничивает очередь GPU и освобождает CPU при ожидании драйвера.
+// Даже после отмены дожидаемся единственной отправленной плитки перед новым кадром.
+func waitDispatch() {
+	const pollInterval = time.Millisecond
+	fence := gl.FenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
+	if fence == 0 {
+		gl.Finish()
+		return
+	}
+	defer gl.DeleteSync(fence)
+	for {
+		status := gl.ClientWaitSync(fence, gl.SYNC_FLUSH_COMMANDS_BIT, uint64(pollInterval))
+		switch status {
+		case gl.ALREADY_SIGNALED, gl.CONDITION_SATISFIED:
+			return
+		case gl.WAIT_FAILED:
+			gl.Finish()
+			return
+		default:
+			// Некоторые драйверы немедленно возвращают TIMEOUT_EXPIRED.
+			// Таймер предотвращает активное ожидание и даёт выполняться UI.
+			time.Sleep(pollInterval)
+		}
+	}
 }
 
 func sampleCancelled(request gpuSampleRequest) bool {

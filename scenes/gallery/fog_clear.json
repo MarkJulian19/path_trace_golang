@@ -1,0 +1,287 @@
+{
+  "name": "Gallery: the same light shafts scene without fog",
+  "camera": {
+    "position": {
+      "x": 7,
+      "y": 3.2,
+      "z": 9
+    },
+    "target": {
+      "x": 0,
+      "y": 1.7,
+      "z": -2
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 44,
+    "aperture": 0,
+    "focusDist": 10,
+    "aspectRatio": 1.7777777777777777
+  },
+  "background": {
+    "r": 0.005,
+    "g": 0.005,
+    "b": 0.005
+  },
+  "sky": {
+    "type": "solid",
+    "color": {
+      "r": 0.005,
+      "g": 0.005,
+      "b": 0.005
+    }
+  },
+  "materials": [
+    {
+      "id": "floor",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.3,
+        "g": 0.3,
+        "b": 0.3
+      }
+    },
+    {
+      "id": "wall",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.12,
+        "g": 0.12,
+        "b": 0.12
+      }
+    },
+    {
+      "id": "dark",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.025,
+        "g": 0.025,
+        "b": 0.025
+      }
+    },
+    {
+      "id": "window",
+      "type": "emissive",
+      "emit": {
+        "r": 1,
+        "g": 0.75,
+        "b": 0.43
+      },
+      "power": 35
+    },
+    {
+      "id": "glass",
+      "type": "dielectric",
+      "ior": 1.5,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "metal",
+      "type": "metal",
+      "albedo": {
+        "r": 0.85,
+        "g": 0.9,
+        "b": 0.96
+      },
+      "smoothness": 0.88,
+      "reflectivity": 1
+    }
+  ],
+  "objects": [
+    {
+      "id": "floor",
+      "type": "plane",
+      "materialId": "floor",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "back",
+      "type": "box",
+      "materialId": "wall",
+      "position": {
+        "x": 0,
+        "y": 3,
+        "z": -7
+      },
+      "size": {
+        "x": 14,
+        "y": 6,
+        "z": 0.2
+      }
+    },
+    {
+      "id": "left",
+      "type": "box",
+      "materialId": "wall",
+      "position": {
+        "x": -6,
+        "y": 3,
+        "z": -2
+      },
+      "size": {
+        "x": 0.2,
+        "y": 6,
+        "z": 12
+      }
+    },
+    {
+      "id": "window",
+      "type": "box",
+      "materialId": "window",
+      "position": {
+        "x": -5.8,
+        "y": 3.4,
+        "z": -3.5
+      },
+      "size": {
+        "x": 0.1,
+        "y": 2.8,
+        "z": 4.5
+      }
+    },
+    {
+      "id": "glass",
+      "type": "sphere",
+      "materialId": "glass",
+      "position": {
+        "x": 0.4,
+        "y": 1.15,
+        "z": -1
+      },
+      "size": {
+        "x": 1.15,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "silver",
+      "type": "sphere",
+      "materialId": "metal",
+      "position": {
+        "x": -2,
+        "y": 0.8,
+        "z": 1
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "back-silver",
+      "type": "sphere",
+      "materialId": "metal",
+      "position": {
+        "x": 2.8,
+        "y": 1,
+        "z": -4
+      },
+      "size": {
+        "x": 1,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "slat-0",
+      "type": "box",
+      "materialId": "dark",
+      "position": {
+        "x": -5.45,
+        "y": 3.4,
+        "z": -5.5
+      },
+      "size": {
+        "x": 0.25,
+        "y": 3.2,
+        "z": 0.35
+      }
+    },
+    {
+      "id": "slat-1",
+      "type": "box",
+      "materialId": "dark",
+      "position": {
+        "x": -5.45,
+        "y": 3.4,
+        "z": -4.5
+      },
+      "size": {
+        "x": 0.25,
+        "y": 3.2,
+        "z": 0.35
+      }
+    },
+    {
+      "id": "slat-2",
+      "type": "box",
+      "materialId": "dark",
+      "position": {
+        "x": -5.45,
+        "y": 3.4,
+        "z": -3.5
+      },
+      "size": {
+        "x": 0.25,
+        "y": 3.2,
+        "z": 0.35
+      }
+    },
+    {
+      "id": "slat-3",
+      "type": "box",
+      "materialId": "dark",
+      "position": {
+        "x": -5.45,
+        "y": 3.4,
+        "z": -2.5
+      },
+      "size": {
+        "x": 0.25,
+        "y": 3.2,
+        "z": 0.35
+      }
+    },
+    {
+      "id": "slat-4",
+      "type": "box",
+      "materialId": "dark",
+      "position": {
+        "x": -5.45,
+        "y": 3.4,
+        "z": -1.5
+      },
+      "size": {
+        "x": 0.25,
+        "y": 3.2,
+        "z": 0.35
+      }
+    }
+  ],
+  "fog": null,
+  "settings": {
+    "width": 2560,
+    "height": 1440,
+    "samplesPerPx": 1000,
+    "maxDepth": 24,
+    "maxRayDist": 100
+  }
+}

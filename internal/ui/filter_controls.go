@@ -30,7 +30,7 @@ func newDenoiseBox(
 	enabled *bool,
 	sigmaS, sigmaR *float64,
 ) fyne.CanvasObject {
-	check := widget.NewCheck("GPU denoise (bilateral 3x3)", func(value bool) {
+	check := widget.NewCheck("CPU/GPU denoise (edge-preserving)", func(value bool) {
 		*enabled = value
 		applyDenoise(service, startRender, *enabled, *sigmaS, *sigmaR)
 	})
@@ -39,13 +39,13 @@ func newDenoiseBox(
 	sigmaSEntry.SetText(fmt.Sprintf("%.2f", *sigmaS))
 	sigmaREntry := widget.NewEntry()
 	sigmaREntry.SetText(fmt.Sprintf("%.2f", *sigmaR))
-	apply := widget.NewButton("Apply GPU denoise", func() {
+	apply := widget.NewButton("Apply denoise", func() {
 		*sigmaS = parsePositiveSettingsFloat(sigmaSEntry, *sigmaS)
 		*sigmaR = parsePositiveSettingsFloat(sigmaREntry, *sigmaR)
 		applyDenoise(service, startRender, *enabled, *sigmaS, *sigmaR)
 	})
 	return container.NewVBox(
-		widget.NewLabel("GPU denoise"), check,
+		widget.NewLabel("CPU/GPU denoise"), check,
 		container.NewGridWithColumns(2,
 			widget.NewLabel("Sigma S (space)"), sigmaSEntry,
 			widget.NewLabel("Sigma R (color)"), sigmaREntry,
@@ -55,9 +55,6 @@ func newDenoiseBox(
 }
 
 func applyDenoise(service *engine.Service, startRender func(bool), enabled bool, sigmaS, sigmaR float64) {
-	if service.GetBackend() != engine.BackendGPU {
-		return
-	}
 	service.SetDenoiseConfigFromUI(enabled, sigmaS, sigmaR)
 	startRender(false)
 }

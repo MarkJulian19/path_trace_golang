@@ -1,0 +1,102 @@
+{
+  "backend": "gpu",
+  "renderer": "Intel(R) Arc(TM) 140T GPU (16GB)",
+  "driver": "OpenGL 4.3.0 - Build 32.0.101.6554",
+  "width": 2560,
+  "height": 1440,
+  "spp": 1000,
+  "depth": 24,
+  "seed": 42,
+  "denoise": {
+    "enabled": true,
+    "space": 0.05,
+    "color": 0,
+    "color_zero_uses_default": 0.15,
+    "smooth": false
+  },
+  "images": [
+    {
+      "file": "glass-studio.png",
+      "scene": "scenes/gallery/glass_studio.json",
+      "elapsed_seconds": 55.2710998,
+      "sha256": "4da66895396ff1569465e265885c0366580bec01c5e0071440f3e2c09d7f201c",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "fog-shafts.png",
+      "scene": "scenes/gallery/fog_shafts.json",
+      "elapsed_seconds": 68.0385378,
+      "sha256": "e27275638a0b62bd8cbe419a3776c73d85b911747faebcfbb851f4c155851322",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "fog-clear.png",
+      "scene": "scenes/gallery/fog_clear.json",
+      "elapsed_seconds": 48.7861013,
+      "sha256": "5ba9b69ec342befe72a874d26a64b2d3451bc3743b21e0340b4a92575e3b362d",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "midnight.png",
+      "scene": "scenes/gallery/midnight.json",
+      "elapsed_seconds": 135.4120887,
+      "sha256": "713500aae79fd3880b043ed436766141c548db784b2fd30b0a6cf18cae3cce61",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "prism-clear.png",
+      "scene": "scenes/gallery/prism_clear.json",
+      "elapsed_seconds": 326.9223821,
+      "sha256": "5b680c404f407912130d7047d32bdfe6630530d23ecbb9b6144e6fe0c7f24d7f",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "prism-atrium.png",
+      "scene": "scenes/engine_showcase.json",
+      "elapsed_seconds": 427.3899115,
+      "sha256": "2324499e43d5bd3cf1391e61614c458fec31fbca243723c84844e5f56b9d7568",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "metal-and-glass.png",
+      "scene": "scenes/rtx_showcase.json",
+      "elapsed_seconds": 127.5376938,
+      "sha256": "fd97a70072a06a0d9273fdb443acecafaa9939d5a449113e60c5e4506733dc2d",
+      "validation": "surface-projected intersections; no reflected-ray self-hits in CPU/GPU regressions",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    },
+    {
+      "file": "glass-refraction.png",
+      "scene": "scenes/validation/glass_grid.json",
+      "elapsed_seconds": 42.3158464,
+      "sha256": "d36e51d10352f2db9f0b71b4dc3c8c8e75ce3dd69fa58cac898e2c02b5473927",
+      "timing_scope": "rendering and PNG encoding",
+      "intersection_validation": "surface-projected intersections; reflected rays leave their convex surfaces"
+    }
+  ],
+  "generated_on": "2026-10-21",
+  "platform": "native Windows OpenGL",
+  "max_ray_distance": 100,
+  "interface": {
+    "file": "interface.png",
+    "width": 3072,
+    "height": 1779,
+    "scene": "scenes/gallery/glass_studio.json",
+    "viewport_width": 2560,
+    "viewport_height": 1440,
+    "spp": 1000,
+    "depth": 24,
+    "backend": "gpu",
+    "seed": "random initialization in the UI",
+    "sha256": "ce4451db3e5801e119a6d5420623425f3e6086bf12e23c4cbc84f3e89b2e6d52"
+  },
+  "samples_per_pass": 4,
+  "surface_reconstruction_fix": true
+}

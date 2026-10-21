@@ -1,0 +1,231 @@
+{
+  "name": "Validation: small light, GGX, mirror and glass noise",
+  "camera": {
+    "position": {
+      "x": 0,
+      "y": 1.4,
+      "z": 6
+    },
+    "target": {
+      "x": 0,
+      "y": 0.3,
+      "z": 0
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 40,
+    "aperture": 0,
+    "focusDist": 7,
+    "aspectRatio": 1.7777777777777777
+  },
+  "materials": [
+    {
+      "id": "white",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.75,
+        "g": 0.75,
+        "b": 0.75
+      }
+    },
+    {
+      "id": "red",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.7,
+        "g": 0.08,
+        "b": 0.05
+      }
+    },
+    {
+      "id": "blue",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.05,
+        "g": 0.1,
+        "b": 0.7
+      }
+    },
+    {
+      "id": "rough",
+      "type": "metal",
+      "albedo": {
+        "r": 0.85,
+        "g": 0.65,
+        "b": 0.3
+      },
+      "smoothness": 0.4,
+      "reflectivity": 1
+    },
+    {
+      "id": "mirror",
+      "type": "mirror",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.95,
+        "b": 0.95
+      },
+      "reflectivity": 1
+    },
+    {
+      "id": "clear",
+      "type": "dielectric",
+      "ior": 1.5,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "lamp",
+      "type": "emissive",
+      "emit": {
+        "r": 1,
+        "g": 0.9,
+        "b": 0.75
+      },
+      "power": 120
+    }
+  ],
+  "objects": [
+    {
+      "id": "floor",
+      "type": "plane",
+      "material_id": "white",
+      "position": {
+        "x": 0,
+        "y": -1,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "back",
+      "type": "box",
+      "material_id": "white",
+      "position": {
+        "x": 0,
+        "y": 1,
+        "z": -2.5
+      },
+      "size": {
+        "x": 6,
+        "y": 4,
+        "z": 0.15
+      }
+    },
+    {
+      "id": "left",
+      "type": "box",
+      "material_id": "red",
+      "position": {
+        "x": -3,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 0.15,
+        "y": 4,
+        "z": 5
+      }
+    },
+    {
+      "id": "right",
+      "type": "box",
+      "material_id": "blue",
+      "position": {
+        "x": 3,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 0.15,
+        "y": 4,
+        "z": 5
+      }
+    },
+    {
+      "id": "metal",
+      "type": "sphere",
+      "material_id": "rough",
+      "position": {
+        "x": -1.45,
+        "y": -0.2,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "glass",
+      "type": "sphere",
+      "material_id": "clear",
+      "position": {
+        "x": 0,
+        "y": -0.2,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "mirror",
+      "type": "sphere",
+      "material_id": "mirror",
+      "position": {
+        "x": 1.45,
+        "y": -0.2,
+        "z": 0
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "small-light",
+      "type": "sphere_light",
+      "material_id": "lamp",
+      "position": {
+        "x": 0,
+        "y": 2.5,
+        "z": 0.5
+      },
+      "size": {
+        "x": 0.18,
+        "y": 0,
+        "z": 0
+      }
+    }
+  ],
+  "sky": {
+    "type": "solid",
+    "color": {
+      "r": 0,
+      "g": 0,
+      "b": 0
+    }
+  },
+  "settings": {
+    "width": 320,
+    "height": 180,
+    "samplesPerPx": 64,
+    "maxDepth": 24,
+    "maxRayDist": 100
+  }
+}

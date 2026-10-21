@@ -112,13 +112,6 @@ func BenchmarkInternalMath(b *testing.B) {
 			benchmarkInternalVec = r.at(0.5)
 		}
 	})
-	b.Run("randomInUnitSphere", func(b *testing.B) {
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalVec = randomInUnitSphere(rng)
-		}
-	})
 	b.Run("randomCosineDirection", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -188,68 +181,25 @@ func BenchmarkInternalMaterials(b *testing.B) {
 			benchmarkInternalFloat = clamp01(0.5)
 		}
 	})
-	b.Run("emitted", func(b *testing.B) {
-		materialValue := convertMaterial(sc.Materials[3])
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalVec = materialValue.emitted()
-		}
-	})
-	b.Run("scatter-lambert", func(b *testing.B) {
-		materialValue := convertMaterial(sc.Materials[0])
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterLambert(
-				rng,
-				&record,
-			)
-		}
-	})
-	b.Run("scatter-metal", func(b *testing.B) {
-		materialValue := convertMaterial(sc.Materials[1])
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterMetal(
-				rng,
-				incoming,
-				&record,
-			)
-		}
-	})
-	b.Run("scatter-dielectric", func(b *testing.B) {
-		materialValue := convertMaterial(sc.Materials[2])
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterDielectric(
-				rng,
-				incoming,
-				&record,
-			)
-		}
-	})
-	b.Run("scatter-emissive", func(b *testing.B) {
-		materialValue := convertMaterial(sc.Materials[3])
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterEmissive()
-		}
-	})
-	b.Run("scatter-mirror", func(b *testing.B) {
-		materialValue := convertMaterial(sc.Materials[4])
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterMirror(
-				incoming,
-				&record,
-			)
-		}
-	})
+
+	for i, name := range []string{"scatter-lambert", "scatter-metal", "scatter-dielectric", "scatter-emissive", "scatter-mirror"} {
+		b.Run(name, func(b *testing.B) {
+			materialValue := convertMaterial(sc.Materials[i+1])
+			record.mat = &materialValue
+			world := &cpuRenderWorld{
+				objects:    []hittable{{kind: hittableSphere, sphere: sphere{radius: 1, mat: materialValue}}},
+				maxRayDist: 1000,
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				result := scatterCPUSurface(incoming, world, record, rng, -1, true)
+				benchmarkInternalScatterOK = result.scattered
+				benchmarkInternalVec = result.attenuation
+				benchmarkInternalRay = ray{orig: record.p, dir: result.direction}
+			}
+		})
+	}
 	b.Run("reflectance", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -310,15 +260,14 @@ func BenchmarkInternalObjects(b *testing.B) {
 
 func BenchmarkInternalRayColor(b *testing.B) {
 	sc := internalBenchmarkScene()
-	world := sceneToWorld(sc)
+	world := newCPURenderWorld(sc, Config{MaxRayDist: 1000})
 	rng := newRandSource()
-	record := hitRecord{}
 	incoming := ray{orig: v(0, 1, 5), dir: v(0, -0.1, -1).unit()}
 	background := func(_ ray) vec3 { return v(0.05, 0.05, 0.05) }
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		benchmarkInternalColor = rayColorOpt(incoming, world, background, internalBenchmarkDepth, rng, &record, 0)
+		benchmarkInternalColor = rayColorGPUParity(incoming, world, background, internalBenchmarkDepth, rng)
 	}
 }
 

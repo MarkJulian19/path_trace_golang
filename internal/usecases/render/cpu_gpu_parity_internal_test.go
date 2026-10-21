@@ -143,8 +143,8 @@ func TestCPURenderWorldMatchesGPULightSourceSlots(t *testing.T) {
 	if world.lights[1].emit != (vec3{}) {
 		t.Fatalf("zero-power light emission = %+v, want zero", world.lights[1].emit)
 	}
-	if world.lights[2].sceneIdx != 2 || world.lights[2].valid {
-		t.Fatalf("box light = %+v, want invalid geometry slot 2", world.lights[2])
+	if world.lights[2].sceneIdx != 2 || !world.lights[2].valid {
+		t.Fatalf("box light = %+v, want valid geometry slot 2", world.lights[2])
 	}
 	if world.lights[0].emit != v(2, 1, 0.5) {
 		t.Fatalf("fallback-material emission = %+v, want (2, 1, 0.5)", world.lights[0].emit)
@@ -184,11 +184,13 @@ func TestCPUDirectLightFromSphereSourceIsNonZero(t *testing.T) {
 	for seed := uint64(1); seed <= 128; seed++ {
 		rng := &randSource{state: 0x9e3779b97f4a7c15 ^ seed}
 		contrib := estimateDirectLightSingleCPU(
+			ray{dir: v(0, -1, 0)},
 			world,
 			&world.lights[0],
 			surfHit,
 			v(1, 1, 1),
 			rng,
+			true,
 		)
 		total = total.add(contrib)
 	}

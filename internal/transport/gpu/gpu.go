@@ -18,6 +18,8 @@ import (
 	domainerrors "github.com/MarkJulian19/path_trace_golang/internal/entities/errors"
 	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
 	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/renderdisplay"
+	"github.com/MarkJulian19/path_trace_golang/internal/renderfilter"
 )
 
 var (
@@ -34,7 +36,6 @@ const (
 	gpuMaxSmoothRadius         = 5
 	gpuRGBAComponents          = 4
 	gpuRGBComponents           = 3
-	gpuVarianceComponents      = 9
 	gpuFloatBytes              = 4
 	gpuByteMax                 = 255.0
 	gpuAnisotropyLimit         = 0.9
@@ -47,7 +48,6 @@ const (
 	gpuLightBinding            = 6
 	gpuFogBinding              = 5
 	gpuAccumBinding            = 7
-	gpuVarianceBinding         = 8
 	gpuPrevFrameTextureUnit    = 9
 	gpuWorkgroupSize           = 32
 	gpuWireframeWorkgroupSize  = 16
@@ -335,8 +335,9 @@ type gpuRenderer struct {
 	window    *glfw.Window
 
 	// readTmp — переиспользуемый CPU-буфер для PBO→float readback (RGBA).
-	readTmp  []float32
-	pboIndex int
+	readTmp      []float32
+	pboIndex     int
+	dispatchTile int
 
 	width      int
 	height     int
@@ -353,14 +354,13 @@ type gpuRenderer struct {
 	pbo              uint32
 	pboBack          uint32 // Второй PBO для асинхронного чтения (двойная буферизация)
 
-	matSSBO      uint32
-	objSSBO      uint32
-	lightSSBO    uint32 // SSBO для списка индексов эмиссивных объектов
-	accumSSBO    uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
-	varianceSSBO uint32 // SSBO для variance данных (width * height * 9 * float32) - [mean, M2, count] × 3 канала
-	camUBO       uint32
-	skyUBO       uint32
-	fogUBO       uint32
+	matSSBO   uint32
+	objSSBO   uint32
+	lightSSBO uint32 // SSBO для списка индексов эмиссивных объектов
+	accumSSBO uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
+	camUBO    uint32
+	skyUBO    uint32
+	fogUBO    uint32
 }
 
 // Go-side copies of material / object type constants used in GLSL.
@@ -448,9 +448,10 @@ func writeTonemappedPixel(dst []uint8, tmp []float32, off int) {
 	rGamma := tonemapGamma(tmp[off])
 	gGamma := tonemapGamma(tmp[off+1])
 	bGamma := tonemapGamma(tmp[off+2])
-	dst[off] = uint8(rGamma*gpuByteMax + gpuHalf)
-	dst[off+1] = uint8(gGamma*gpuByteMax + gpuHalf)
-	dst[off+2] = uint8(bGamma*gpuByteMax + gpuHalf)
+	threshold := renderdisplay.Dither(off / gpuRGBAComponents)
+	dst[off] = renderdisplay.Byte(float64(rGamma)*gpuByteMax, threshold)
+	dst[off+1] = renderdisplay.Byte(float64(gGamma)*gpuByteMax, threshold)
+	dst[off+2] = renderdisplay.Byte(float64(bGamma)*gpuByteMax, threshold)
 	dst[off+3] = 255
 }
 
@@ -610,7 +611,6 @@ func (r *gpuRenderer) initGLResources() {
 	gl.GenBuffers(1, &r.objSSBO)
 	gl.GenBuffers(1, &r.lightSSBO)
 	gl.GenBuffers(1, &r.accumSSBO)
-	gl.GenBuffers(1, &r.varianceSSBO)
 	gl.GenBuffers(1, &r.camUBO)
 	gl.GenBuffers(1, &r.skyUBO)
 	gl.GenBuffers(1, &r.fogUBO)
@@ -784,22 +784,14 @@ func packFogBlock(sc *scene.Scene) [16]float32 {
 
 func applyDenoise(dst []byte, width, height int, cfg denoiseConfig) {
 	timer := startGPUTimer("cpu_denoise")
-	smoothed := make([]byte, len(dst))
-	kernel := newDenoiseKernel(cfg)
-	parallelRows(height, func(y0, y1 int) {
-		for y := y0; y < y1; y++ {
-			for x := range width {
-				writeDenoisedPixel(smoothed, dst, width, height, x, y, kernel)
-			}
-		}
-	})
-	copy(dst, smoothed)
+	renderfilter.Apply(
+		dst,
+		width,
+		height,
+		renderfilter.Config{Enabled: cfg.Enabled, SigmaS: cfg.SigmaS, SigmaR: cfg.SigmaR},
+		nil,
+	)
 	timer.stop()
-}
-
-type denoiseKernel struct {
-	spatialWeight [9]float64
-	twoSigmaR2    float64
 }
 
 type smoothIntegralBuffer struct {
@@ -807,71 +799,6 @@ type smoothIntegralBuffer struct {
 }
 
 var smoothIntegralPool sync.Pool
-
-func newDenoiseKernel(cfg denoiseConfig) denoiseKernel {
-	kernel := denoiseKernel{
-		twoSigmaR2: 2 * cfg.SigmaR * cfg.SigmaR,
-	}
-	twoSigmaS2 := 2 * cfg.SigmaS * cfg.SigmaS
-	weightIndex := 0
-	for ky := -1; ky <= 1; ky++ {
-		for kx := -1; kx <= 1; kx++ {
-			kernel.spatialWeight[weightIndex] = math.Exp(-float64(kx*kx+ky*ky) / twoSigmaS2)
-			weightIndex++
-		}
-	}
-	return kernel
-}
-
-func writeDenoisedPixel(dst, src []byte, width, height, x, y int, kernel denoiseKernel) {
-	centerIndex := (y*width + x) * gpuRGBAComponents
-	center := [3]float64{
-		float64(src[centerIndex]) / gpuByteMax,
-		float64(src[centerIndex+1]) / gpuByteMax,
-		float64(src[centerIndex+2]) / gpuByteMax,
-	}
-	sumR, sumG, sumB, sumWeight := denoiseNeighborhood(src, width, height, x, y, center, kernel)
-	if sumWeight <= 0 {
-		copy(dst[centerIndex:centerIndex+gpuRGBAComponents], src[centerIndex:centerIndex+gpuRGBAComponents])
-		return
-	}
-	dst[centerIndex] = uint8(clampFloat(sumR/sumWeight, 0, 1)*gpuByteMax + gpuHalf)
-	dst[centerIndex+1] = uint8(clampFloat(sumG/sumWeight, 0, 1)*gpuByteMax + gpuHalf)
-	dst[centerIndex+2] = uint8(clampFloat(sumB/sumWeight, 0, 1)*gpuByteMax + gpuHalf)
-	dst[centerIndex+3] = 255
-}
-
-func denoiseNeighborhood(
-	src []byte,
-	width, height, x, y int,
-	center [3]float64,
-	kernel denoiseKernel,
-) (float64, float64, float64, float64) {
-	var sumR, sumG, sumB, sumWeight float64
-	for ky := -1; ky <= 1; ky++ {
-		for kx := -1; kx <= 1; kx++ {
-			weightIndex := (ky+1)*3 + kx + 1
-			nx, ny := x+kx, y+ky
-			if nx < 0 || nx >= width || ny < 0 || ny >= height {
-				continue
-			}
-			index := (ny*width + nx) * gpuRGBAComponents
-			nr := float64(src[index]) / gpuByteMax
-			ng := float64(src[index+1]) / gpuByteMax
-			nb := float64(src[index+2]) / gpuByteMax
-			dr, dg, db := center[0]-nr, center[1]-ng, center[2]-nb
-			distanceColor := dr*dr + dg*dg + db*db
-			spatialWeight := kernel.spatialWeight[weightIndex]
-			colorWeight := math.Exp(-distanceColor / kernel.twoSigmaR2)
-			weight := spatialWeight * colorWeight
-			sumWeight += weight
-			sumR += nr * weight
-			sumG += ng * weight
-			sumB += nb * weight
-		}
-	}
-	return sumR, sumG, sumB, sumWeight
-}
 
 func applySmooth(dst []byte, width, height int, cfg smoothConfig) {
 	timer := startGPUTimer("cpu_smooth")
@@ -937,9 +864,10 @@ func writeSmoothedPixel(dst, src []byte, width, height, x, y, radius int, streng
 
 func writeSmoothedPixelValues(dst, src []byte, index int, sumR, sumG, sumB, count, strength float64) {
 	origR, origG, origB := float64(src[index]), float64(src[index+1]), float64(src[index+2])
-	dst[index] = byte(clampFloat((1-strength)*origR+strength*sumR/count, 0, gpuByteMax) + gpuHalf)
-	dst[index+1] = byte(clampFloat((1-strength)*origG+strength*sumG/count, 0, gpuByteMax) + gpuHalf)
-	dst[index+2] = byte(clampFloat((1-strength)*origB+strength*sumB/count, 0, gpuByteMax) + gpuHalf)
+	threshold := renderdisplay.Dither(index / gpuRGBAComponents)
+	dst[index] = renderdisplay.Byte((1-strength)*origR+strength*sumR/count, threshold)
+	dst[index+1] = renderdisplay.Byte((1-strength)*origG+strength*sumG/count, threshold)
+	dst[index+2] = renderdisplay.Byte((1-strength)*origB+strength*sumB/count, threshold)
 	dst[index+3] = 255
 }
 

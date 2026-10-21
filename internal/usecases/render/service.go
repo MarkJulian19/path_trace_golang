@@ -8,6 +8,7 @@ import (
 
 	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
 	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/renderfilter"
 )
 
 // Service управляет выбором средства рендера и связывает сценарий с адаптером GPU.
@@ -21,6 +22,8 @@ type Service struct {
 	cpuModeMu       sync.RWMutex
 	cpuMode         int
 	fallbackWarning sync.Once
+	denoiseMu       sync.RWMutex
+	denoise         renderfilter.Config
 }
 
 // New создаёт сценарий рендера с необязательным GPU-адаптером.
@@ -29,6 +32,7 @@ func New(gpuBackend GPUBackend, gpuControls GPUControls) *Service {
 		gpuBackend:  gpuBackend,
 		gpuControls: gpuControls,
 		backend:     BackendCPU,
+		denoise:     renderfilter.Normalize(renderfilter.Config{Enabled: true}),
 	}
 }
 
@@ -94,7 +98,7 @@ func (s *Service) IntoWithCancel(
 		return s.renderIntoGPU(sc, cfg, img, progress, cancelled)
 	}
 
-	renderIntoCPUWithCancel(sc, cfg, img, progress, s.GetCPURenderMode(), cancelled)
+	s.renderCPUFiltered(sc, cfg, img, progress, cancelled)
 	return BackendCPU
 }
 
@@ -158,6 +162,9 @@ func (s *Service) SetRenderCancel(cancel bool) {
 
 // SetDenoiseConfigFromUI задаёт параметры подавления шума.
 func (s *Service) SetDenoiseConfigFromUI(enabled bool, sigmaS, sigmaR float64) {
+	s.denoiseMu.Lock()
+	s.denoise = renderfilter.Normalize(renderfilter.Config{Enabled: enabled, SigmaS: sigmaS, SigmaR: sigmaR})
+	s.denoiseMu.Unlock()
 	if s.gpuControls != nil {
 		s.gpuControls.SetDenoiseConfigFromUI(enabled, sigmaS, sigmaR)
 	}
@@ -185,7 +192,7 @@ func (s *Service) renderIntoGPU(
 	cancelled func() bool,
 ) Backend {
 	if s.gpuBackend == nil {
-		renderIntoCPUWithCancel(sc, cfg, img, progress, s.GetCPURenderMode(), cancelled)
+		s.renderCPUFiltered(sc, cfg, img, progress, cancelled)
 		return BackendCPU
 	}
 
@@ -197,7 +204,7 @@ func (s *Service) renderIntoGPU(
 	}
 	if err != nil {
 		s.warnGPUFallback(err)
-		renderIntoCPUWithCancel(sc, cfg, img, progress, s.GetCPURenderMode(), cancelled)
+		s.renderCPUFiltered(sc, cfg, img, progress, cancelled)
 		return BackendCPU
 	}
 	return BackendGPU

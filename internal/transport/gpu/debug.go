@@ -20,7 +20,7 @@ const (
 // PATHTRACER_GPU_DEBUG: 1/true/on — подробные тайминги GPU-пайплайна в лог.
 // PATHTRACER_GPU_LIVE_READBACK: 0 — не читать кадр на каждом N-м сэмпле (только финал).
 // PATHTRACER_GPU_TEMPORAL: 0 — отключить temporal accumulation каждый сэмпл.
-// PATHTRACER_GPU_TILE_SIZE: размер tile-dispatch (32..512, по умолчанию 256).
+// PATHTRACER_GPU_TILE_SIZE: предельный размер адаптивной плитки (32..512, по умолчанию 256).
 // PATHTRACER_GPU_SAMPLES_PER_PASS: бюджет лучей за один проход (1..16, по умолчанию 4).
 
 var (

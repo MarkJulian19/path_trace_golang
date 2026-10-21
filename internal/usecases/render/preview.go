@@ -67,7 +67,7 @@ func wireframeSurfaceColor(rec *hitRecord, brightness float64) vec3 {
 
 func previewRayColor(r ray, world *cpuRenderWorld) vec3 {
 	var rec hitRecord
-	if !hitClosestCPU(world, r, world.maxRayDist, -1, &rec) {
+	if !hitClosestCPU(world, r, world.maxRayDist, &rec) {
 		return v(renderRoughnessScale, renderRoughnessScale, renderRoughnessScale)
 	}
 	if world.objects[rec.objectIdx].kind == hittableSphere {

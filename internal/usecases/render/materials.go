@@ -30,7 +30,7 @@ type material struct {
 }
 
 func convertMaterial(m scene.Material) material {
-	al := v(m.Albedo.R, m.Albedo.G, m.Albedo.B)
+	al := v(clamp01(m.Albedo.R), clamp01(m.Albedo.G), clamp01(m.Albedo.B))
 
 	switch m.Type {
 	case scene.MaterialLambert:
@@ -61,7 +61,7 @@ func convertMetalMaterial(m scene.Material, albedo vec3) material {
 
 func convertDielectricMaterial(m scene.Material, albedo vec3) material {
 	ior := m.IOR
-	if ior == 0 {
+	if ior <= 0 {
 		ior = renderDefaultIOR
 	}
 	return material{
@@ -75,7 +75,7 @@ func convertDielectricMaterial(m scene.Material, albedo vec3) material {
 }
 
 func emissiveColor(m scene.Material) vec3 {
-	return v(m.Emit.R*m.Power, m.Emit.G*m.Power, m.Emit.B*m.Power)
+	return v(max(0, m.Emit.R)*max(0, m.Power), max(0, m.Emit.G)*max(0, m.Power), max(0, m.Emit.B)*max(0, m.Power))
 }
 
 func materialSmoothness(m scene.Material) float64 {
@@ -118,85 +118,17 @@ func clamp01(x float64) float64 {
 	return x
 }
 
-func (m *material) emitted() vec3 {
-	if m.typ == matEmissive {
-		return m.emit
-	}
-	return vec3{x: 0, y: 0, z: 0} // Прямое создание вместо v()
-}
-
-func (m *material) scatterEmissive() (bool, vec3, ray) {
-	return false, vec3{}, ray{}
-}
-
-func (m *material) scatterLambert(rng *randSource, rec *hitRecord) (bool, vec3, ray) {
-	scatteredDir := randomCosineDirection(rec.normal, rng)
-	if m.rough > renderRoughnessThreshold {
-		randomOffset := randomInUnitSphere(rng)
-		scatteredDir.x += randomOffset.x * m.rough * renderRoughnessScale
-		scatteredDir.y += randomOffset.y * m.rough * renderRoughnessScale
-		scatteredDir.z += randomOffset.z * m.rough * renderRoughnessScale
-		scatteredDir = scatteredDir.unit()
-	}
-	return true, m.albedo, ray{orig: rec.p, dir: scatteredDir}
-}
-
-func (m *material) scatterMetal(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
-	dirLen := rIn.dir.length()
-	if dirLen == 0 {
-		return false, vec3{}, ray{orig: rec.p, dir: rIn.dir}
-	}
-	unitDir := rIn.dir.div(dirLen)
-	reflected := reflectVec(unitDir, rec.normal)
-	if m.rough <= renderRoughnessThreshold {
-		return true, m.albedo, ray{orig: rec.p, dir: reflected}
-	}
-	scatteredDir := randomCosineDirection(reflected, rng)
-	alpha := m.rough * m.rough
-	scatteredDir = vec3{
-		x: reflected.x*(1-renderUnitValue*alpha) + scatteredDir.x*alpha,
-		y: reflected.y*(1-renderUnitValue*alpha) + scatteredDir.y*alpha,
-		z: reflected.z*(1-renderUnitValue*alpha) + scatteredDir.z*alpha,
-	}.unit()
-	if scatteredDir.dot(rec.normal) <= 0 {
-		scatteredDir = reflected
-	}
-	return true, m.albedo, ray{orig: rec.p, dir: scatteredDir}
-}
-
-func (m *material) scatterDielectric(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
-	attenuation := vec3{x: 1, y: 1, z: 1}
-	refractionRatio := m.ior
-	if rec.frontFace {
-		refractionRatio = 1 / m.ior
-	}
-	dirLen := rIn.dir.length()
-	if dirLen == 0 {
-		return false, attenuation, ray{orig: rec.p, dir: rIn.dir}
-	}
-	unitDir := rIn.dir.div(dirLen)
-	cosTheta := math.Min(-unitDir.dot(rec.normal), 1)
-	sinTheta := math.Sqrt(1 - cosTheta*cosTheta)
-	reflectProb := reflectance(cosTheta, refractionRatio)
-	direction := refractVec(unitDir, rec.normal, refractionRatio)
-	if refractionRatio*sinTheta > 1 || reflectProb > rng.Float64() {
-		direction = reflectVec(unitDir, rec.normal)
-	}
-	return true, attenuation, ray{orig: rec.p, dir: direction}
-}
-
-func (m *material) scatterMirror(rIn ray, rec *hitRecord) (bool, vec3, ray) {
-	dirLen := rIn.dir.length()
-	if dirLen == 0 {
-		return false, vec3{}, ray{orig: rec.p, dir: rIn.dir}
-	}
-	reflected := reflectVec(rIn.dir.div(dirLen), rec.normal)
-	return true, m.albedo, ray{orig: rec.p, dir: reflected}
-}
-
 func reflectance(cosine, refIdx float64) float64 {
-	// Schlick approximation
-	r0 := (1 - refIdx) / (1 + refIdx)
-	r0 *= r0
-	return r0 + (1-r0)*math.Pow(1-cosine, renderReflectanceExponent)
+	if refIdx == 1 {
+		return 0
+	}
+	cosine = clamp01(cosine)
+	sinT2 := refIdx * refIdx * (1 - cosine*cosine)
+	if sinT2 >= 1 {
+		return 1
+	}
+	cosT := math.Sqrt(1 - sinT2)
+	rS := (refIdx*cosine - cosT) / (refIdx*cosine + cosT)
+	rP := (cosine - refIdx*cosT) / (cosine + refIdx*cosT)
+	return (rS*rS + rP*rP) * renderHalf
 }

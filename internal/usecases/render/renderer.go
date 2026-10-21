@@ -10,6 +10,7 @@ import (
 
 	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
 	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
+	"github.com/MarkJulian19/path_trace_golang/internal/renderdisplay"
 )
 
 // Config задаёт параметры рендера на границе сценария.
@@ -74,6 +75,7 @@ func renderIntoCPUWithCancel(
 	if isCancelled(cancelled) {
 		return
 	}
+	cfg.SamplesPerPx = max(cfg.SamplesPerPx, 1)
 	if wireframeMode == 1 {
 		cfg.SamplesPerPx = 1
 	}
@@ -102,8 +104,8 @@ func renderCPUImage(
 	progress func(currentSample, totalSamples int),
 	cancelled func() bool,
 ) {
-	invWidth := 1.0 / float64(max(cfg.Width-1, 1))
-	invHeight := 1.0 / float64(max(cfg.Height-1, 1))
+	invWidth := 1.0 / float64(max(cfg.Width, 1))
+	invHeight := 1.0 / float64(max(cfg.Height, 1))
 	invSamples := 1.0 / float64(cfg.SamplesPerPx)
 	heightMinus1 := float64(cfg.Height - 1)
 	clearPixels(img.Pix, cfg.Width*cfg.Height)
@@ -141,7 +143,7 @@ func clearPixels(pix []uint8, pixelCount int) {
 }
 
 func buildRenderTiles(width, height int) chan renderTile {
-	const tileSize = 32
+	const tileSize = 16
 	numTilesX := (width + tileSize - 1) / tileSize
 	numTilesY := (height + tileSize - 1) / tileSize
 	tiles := make(chan renderTile, numTilesX*numTilesY)
@@ -286,20 +288,20 @@ func renderPixel(
 		if isCancelled(cancelled) {
 			return false
 		}
-		currentRay := camera.getRay(float64(x)*invWidth, flipY*invHeight)
+		currentRay := camera.getRay((float64(x)+renderHalf)*invWidth, (flipY+renderHalf)*invHeight)
 		writePreviewPixel(pix, yIdx+x*renderRGBAComponents, previewRayColor(currentRay, world))
 		return true
 	}
 	if cancelled == nil {
 		renderPixelUncancelled(
 			pix, yIdx, x, flipY, invWidth, invHeight, invSamples, camera, cfg,
-			rng, world, bgFunc, wireframeMode,
+			rng, world, bgFunc,
 		)
 		return true
 	}
 	return renderPixelCancelled(
 		pix, yIdx, x, flipY, invWidth, invHeight, invSamples, camera, cfg,
-		rng, world, bgFunc, wireframeMode, cancelled,
+		rng, world, bgFunc, cancelled,
 	)
 }
 
@@ -312,20 +314,15 @@ func renderPixelUncancelled(
 	rng *randSource,
 	world *cpuRenderWorld,
 	bgFunc func(ray) vec3,
-	wireframeMode int,
 ) {
 	col := vec3{}
 	xFloat := float64(x)
-	for range cfg.SamplesPerPx {
+	for sample := range cfg.SamplesPerPx {
+		rng.startPixelSample(cfg.Seed, yIdx/renderRGBAComponents+x, sample)
 		u := (xFloat + rng.Float64()) * invWidth
 		vv := (flipY + rng.Float64()) * invHeight
 		currentRay := camera.getRay(u, vv)
-		if wireframeMode == 1 {
-			var sampleRec hitRecord
-			col = col.add(rayColorOpt(currentRay, world.objects, bgFunc, cfg.MaxDepth, rng, &sampleRec, wireframeMode))
-		} else {
-			col = col.add(rayColorGPUParity(currentRay, world, bgFunc, cfg.MaxDepth, rng))
-		}
+		col = col.add(rayColorGPUParity(currentRay, world, bgFunc, cfg.MaxDepth, rng))
 	}
 	col = col.mul(invSamples)
 	writePixel(pix, yIdx+x*renderRGBAComponents, col)
@@ -340,24 +337,19 @@ func renderPixelCancelled(
 	rng *randSource,
 	world *cpuRenderWorld,
 	bgFunc func(ray) vec3,
-	wireframeMode int,
 	cancelled func() bool,
 ) bool {
 	col := vec3{}
 	xFloat := float64(x)
-	for range cfg.SamplesPerPx {
+	for sample := range cfg.SamplesPerPx {
+		rng.startPixelSample(cfg.Seed, yIdx/renderRGBAComponents+x, sample)
 		if cancelled() {
 			return false
 		}
 		u := (xFloat + rng.Float64()) * invWidth
 		vv := (flipY + rng.Float64()) * invHeight
 		currentRay := camera.getRay(u, vv)
-		if wireframeMode == 1 {
-			var sampleRec hitRecord
-			col = col.add(rayColorOpt(currentRay, world.objects, bgFunc, cfg.MaxDepth, rng, &sampleRec, wireframeMode))
-		} else {
-			col = col.add(rayColorGPUParity(currentRay, world, bgFunc, cfg.MaxDepth, rng))
-		}
+		col = col.add(rayColorGPUParity(currentRay, world, bgFunc, cfg.MaxDepth, rng))
 	}
 	col = col.mul(invSamples)
 	writePixel(pix, yIdx+x*renderRGBAComponents, col)
@@ -368,9 +360,10 @@ func writePixel(pix []uint8, index int, col vec3) {
 	rVal := cpuTonemapGamma(col.x) * renderColorMax
 	gVal := cpuTonemapGamma(col.y) * renderColorMax
 	bVal := cpuTonemapGamma(col.z) * renderColorMax
-	pix[index] = uint8(rVal + renderHalf)
-	pix[index+1] = uint8(gVal + renderHalf)
-	pix[index+2] = uint8(bVal + renderHalf)
+	threshold := renderdisplay.Dither(index / renderRGBAComponents)
+	pix[index] = renderdisplay.Byte(rVal, threshold)
+	pix[index+1] = renderdisplay.Byte(gVal, threshold)
+	pix[index+2] = renderdisplay.Byte(bVal, threshold)
 	pix[index+3] = 255
 }
 
@@ -399,184 +392,6 @@ func backgroundForScene(sc *scene.Scene) func(ray) vec3 {
 	return func(_ ray) vec3 { return bgColor }
 }
 
-// Оптимизированная версия rayColor с переиспользованием hitRecord
-// rec используется только для текущего уровня, для рекурсивных вызовов создаются новые.
-func rayColorOpt(
-	r ray,
-	world []hittable,
-	background func(ray) vec3,
-	depth int,
-	rng *randSource,
-	rec *hitRecord,
-	wireframeMode int,
-) vec3 {
-	if depth <= 0 {
-		return vec3{x: 0, y: 0, z: 0}
-	}
-
-	if !closestHit(r, world, rec) {
-		if wireframeMode == 1 {
-			return v(renderRoughnessScale, renderRoughnessScale, renderRoughnessScale)
-		}
-		return background(r)
-	}
-
-	if wireframeMode == 1 {
-		return wireframeColor(rec)
-	}
-	return shadeRay(r, world, background, depth, rng, rec, wireframeMode)
-}
-
-func shadeRay(
-	r ray, world []hittable, background func(ray) vec3, depth int,
-	rng *randSource, rec *hitRecord, wireframeMode int,
-) vec3 {
-	emitted := rec.mat.emitted()
-	var ok bool
-	var attenuation vec3
-	var scattered ray
-	switch rec.mat.typ {
-	case matLambert:
-		ok, attenuation, scattered = rec.mat.scatterLambert(rng, rec)
-	case matMetal:
-		ok, attenuation, scattered = rec.mat.scatterMetal(rng, r, rec)
-	case matDielectric:
-		ok, attenuation, scattered = rec.mat.scatterDielectric(rng, r, rec)
-	case matMirror:
-		ok, attenuation, scattered = rec.mat.scatterMirror(r, rec)
-	default:
-		ok, attenuation, scattered = rec.mat.scatterEmissive()
-	}
-	if !ok {
-		return emitted
-	}
-
-	if rec.mat.typ == matDielectric && rec.frontFace {
-		scattered, attenuation = applyDielectricPath(scattered, attenuation, world, rec)
-	}
-
-	if !shouldContinueRay(depth, &attenuation, rng) {
-		return emitted
-	}
-
-	var nextRec hitRecord
-	nextColor := rayColorOpt(scattered, world, background, depth-1, rng, &nextRec, wireframeMode)
-	return vec3{
-		x: emitted.x + attenuation.x*nextColor.x,
-		y: emitted.y + attenuation.y*nextColor.y,
-		z: emitted.z + attenuation.z*nextColor.z,
-	}
-}
-
-func shouldContinueRay(depth int, attenuation *vec3, rng *randSource) bool {
-	return depth > 3 || continueRussianRoulette(attenuation, rng)
-}
-
-func closestHit(r ray, world []hittable, rec *hitRecord) bool {
-	hitAnything := false
-	closest := math.MaxFloat64
-	for i := range world {
-		object := &world[i]
-		var hit bool
-		switch object.kind {
-		case hittableSphere:
-			hit = object.sphere.hit(r, renderMinRayDistance, closest, rec)
-		case hittablePlane:
-			hit = object.pln.hit(r, renderMinRayDistance, closest, rec)
-		default:
-			hit = object.box.hit(r, renderMinRayDistance, closest, rec)
-		}
-		if hit {
-			hitAnything = true
-			closest = rec.t
-		}
-	}
-	return hitAnything
-}
-
-func applyDielectricPath(scattered ray, attenuation vec3, world []hittable, rec *hitRecord) (ray, vec3) {
-	exitRec, hitExit := dielectricExit(
-		scattered,
-		world,
-		rec,
-		renderMetalRoughThreshold,
-		renderScatterLengthThreshold,
-		defaultMaxRayDistance,
-	)
-	if !hitExit {
-		return scattered, attenuation
-	}
-	dx := exitRec.p.x - rec.p.x
-	dy := exitRec.p.y - rec.p.y
-	dz := exitRec.p.z - rec.p.z
-	distance := math.Sqrt(dx*dx + dy*dy + dz*dz)
-	if rec.mat.absorption.x > 0 || rec.mat.absorption.y > 0 || rec.mat.absorption.z > 0 {
-		attenuation.x = math.Exp(-rec.mat.absorption.x * distance)
-		attenuation.y = math.Exp(-rec.mat.absorption.y * distance)
-		attenuation.z = math.Exp(-rec.mat.absorption.z * distance)
-	}
-	scattered.orig = exitRec.p
-	return scattered, attenuation
-}
-
-func dielectricExit(
-	scattered ray,
-	world []hittable,
-	rec *hitRecord,
-	exitTMin, minDistanceSq, maxDistanceSq float64,
-) (hitRecord, bool) {
-	var exitRec hitRecord
-	exitT := math.MaxFloat64
-	for i := range world {
-		var tempRec hitRecord
-		object := &world[i]
-		var hit bool
-		switch object.kind {
-		case hittableSphere:
-			hit = object.sphere.hit(scattered, exitTMin, exitT, &tempRec)
-		case hittablePlane:
-			hit = object.pln.hit(scattered, exitTMin, exitT, &tempRec)
-		default:
-			hit = object.box.hit(scattered, exitTMin, exitT, &tempRec)
-		}
-		if !hit {
-			continue
-		}
-		if !validDielectricExit(tempRec, rec, exitT, minDistanceSq, maxDistanceSq) {
-			continue
-		}
-		exitT = tempRec.t
-		exitRec = tempRec
-	}
-	return exitRec, exitT < math.MaxFloat64
-}
-
-func validDielectricExit(tempRec hitRecord, rec *hitRecord, exitT, minDistanceSq, maxDistanceSq float64) bool {
-	if tempRec.mat.typ != matDielectric || tempRec.frontFace || tempRec.t >= exitT {
-		return false
-	}
-	dx := tempRec.p.x - rec.p.x
-	dy := tempRec.p.y - rec.p.y
-	dz := tempRec.p.z - rec.p.z
-	distSq := dx*dx + dy*dy + dz*dz
-	return distSq > minDistanceSq && distSq < maxDistanceSq
-}
-
-func continueRussianRoulette(attenuation *vec3, rng *randSource) bool {
-	maxAttenuation := max(attenuation.x, max(attenuation.y, attenuation.z))
-	if maxAttenuation < renderRoughnessThreshold {
-		return false
-	}
-	rrProb := min(maxAttenuation, renderEdgeThreshold)
-	if rng.Float64() > rrProb {
-		return false
-	}
-	attenuation.x /= rrProb
-	attenuation.y /= rrProb
-	attenuation.z /= rrProb
-	return true
-}
-
 // PickObject выполняет raycast для определения объекта под курсором
 // Возвращает индекс объекта или -1, если объект не найден
 // Строит луч из камеры через указанную точку экрана и находит первый пересеченный объект.
@@ -601,32 +416,10 @@ func clampPixelCoordinate(value, limit int) int {
 }
 
 func pickRay(sc *scene.Scene, cfg Config, x, y int) ray {
-	uCoord := float64(x) / float64(max(cfg.Width-1, 1))
-	vCoord := float64(cfg.Height-1-y) / float64(max(cfg.Height-1, 1))
-	aspect := float64(cfg.Width) / float64(cfg.Height)
-	if sc.Camera.AspectRatio != 0 {
-		aspect = sc.Camera.AspectRatio
-	}
-	theta := sc.Camera.FOV * math.Pi / renderDegreesPerHalfTurn
-	viewportHeight := renderViewportDiameter * math.Tan(theta/renderViewportDiameter)
-	viewportWidth := aspect * viewportHeight
-	origin := v(sc.Camera.Position.X, sc.Camera.Position.Y, sc.Camera.Position.Z)
-	target := v(sc.Camera.Target.X, sc.Camera.Target.Y, sc.Camera.Target.Z)
-	up := v(sc.Camera.Up.X, sc.Camera.Up.Y, sc.Camera.Up.Z)
-	w := origin.sub(target).unit()
-	uVec := up.cross(w).unit()
-	vVec := w.cross(uVec)
-	focusDist := sc.Camera.FocusDist
-	if focusDist == 0 {
-		focusDist = origin.sub(target).length()
-	}
-	horizontal := uVec.mul(viewportWidth * focusDist)
-	vertical := vVec.mul(viewportHeight * focusDist)
-	lowerLeftCorner := origin.sub(horizontal.div(renderViewportDiameter)).
-		sub(vertical.div(renderViewportDiameter)).
-		sub(w.mul(focusDist))
-	dir := lowerLeftCorner.add(horizontal.mul(uCoord)).add(vertical.mul(vCoord)).sub(origin)
-	return ray{orig: origin, dir: dir.unit()}
+	camera := newCamera(sc.Camera, cfg, nil)
+	u := (float64(x) + renderHalf) / float64(max(cfg.Width, 1))
+	vv := (float64(cfg.Height-1-y) + renderHalf) / float64(max(cfg.Height, 1))
+	return camera.getRay(u, vv)
 }
 
 func closestObject(objects []scene.Object, world []hittable, ray ray) int {

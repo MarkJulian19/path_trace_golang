@@ -150,7 +150,7 @@ func (c *renderController) renderWireframeFrame(
 	job *renderJob, sc *scene.Scene, cfg engine.Config, renderImg *image.RGBA,
 ) {
 	// Предыдущий интерактивный рендер мог оставить флаг отмены GPU. Обычный
-	// рендер сбрасывает его в configureGPU, а поток wireframe обходит этот путь.
+	// рендер сбрасывает его в configureRenderer, а поток wireframe обходит этот путь.
 	if c.service.GetBackend() == engine.BackendGPU {
 		c.service.SetRenderCancel(false)
 	}
@@ -276,10 +276,7 @@ func (c *renderController) shouldRefresh(state *renderProgressState, currentSamp
 		}
 		return refresh
 	}
-	if pixelCount <= 2000*2000 {
-		return false
-	}
-	refresh := time.Since(state.last) >= uiFrameMillis*time.Millisecond || currentSample == totalSamples
+	refresh := time.Since(state.last) >= uiProgressUpdateInterval || currentSample == totalSamples
 	if refresh {
 		state.last = time.Now()
 	}
@@ -297,12 +294,12 @@ func progressInterval(pixelCount int) time.Duration {
 	}
 }
 
-func (c *renderController) configureGPU(live bool) {
+func (c *renderController) configureRenderer(live bool) {
+	c.service.SetDenoiseConfigFromUI(*c.denoiseEnabled, *c.denoiseSigmaS, *c.denoiseSigmaR)
 	if c.service.GetBackend() != engine.BackendGPU {
 		return
 	}
 	c.service.PrepareGPU()
-	c.service.SetDenoiseConfigFromUI(*c.denoiseEnabled, *c.denoiseSigmaS, *c.denoiseSigmaR)
 	c.service.SetSmoothConfigFromUI(*c.smoothEnabled, *c.smoothRadius, *c.smoothStrength)
 	c.service.SetLivePreview(live)
 	c.service.SetRenderCancel(false)

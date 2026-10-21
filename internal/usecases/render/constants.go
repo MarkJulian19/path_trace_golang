@@ -22,7 +22,7 @@ const (
 	renderColorMax               = 255.0
 	renderEdgeThreshold          = 0.95
 	renderGrayWireframe          = 0.8
-	renderMinRayDistance         = 0.001
+	renderMinRayDistance         = 1e-9
 
 	defaultWidth           = 1920
 	defaultHeight          = 1080

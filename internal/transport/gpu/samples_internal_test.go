@@ -1,6 +1,29 @@
 package gpu
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestAdaptiveDispatchBudget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                   string
+		current, pixels, limit int
+		elapsed                time.Duration
+		want                   int
+	}{
+		{"slow tile shrinks", 256, 256 * 256, 256, 32 * time.Millisecond, 128},
+		{"fast tile grows", 64, 64 * 64, 256, time.Millisecond, 128},
+		{"configured limit", 256, 256 * 256, 256, time.Millisecond, 256},
+		{"minimum workgroup", 32, 32 * 32, 256, time.Second, 32},
+		{"partial edge does not inflate tile", 128, 128 * 5, 256, time.Millisecond, 128},
+	} {
+		if got := nextDispatchTileSize(tc.current, tc.pixels, tc.limit, tc.elapsed); got != tc.want {
+			t.Errorf("%s: got=%d want=%d", tc.name, got, tc.want)
+		}
+	}
+}
 
 func TestDispatchGroups(t *testing.T) {
 	t.Parallel()

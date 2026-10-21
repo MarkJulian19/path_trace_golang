@@ -19,6 +19,10 @@ func newBackendControls(
 	slider.Step = 1
 	slider.Value = 0
 	label := widget.NewLabel("Backend: CPU")
+	if service.GetBackend() == engine.BackendGPU {
+		slider.Value = 1
+		label.SetText("Backend: GPU")
+	}
 	slider.OnChanged = func(value float64) {
 		if value >= uiHalf {
 			label.SetText("Backend: GPU")

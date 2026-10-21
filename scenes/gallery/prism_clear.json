@@ -1,0 +1,776 @@
+{
+  "name": "Gallery: Prism Atrium, clear air",
+  "camera": {
+    "position": {
+      "x": 5.4,
+      "y": 2.2,
+      "z": 6.8
+    },
+    "target": {
+      "x": 0.0,
+      "y": 1.35,
+      "z": -1.2
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 48,
+    "aperture": 0,
+    "focus_dist": 7.4,
+    "aspect_ratio": 1.7777778
+  },
+  "objects": [
+    {
+      "id": "floor",
+      "type": "plane",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "floor-lambert"
+    },
+    {
+      "id": "ceiling",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 5.8,
+        "z": -0.5
+      },
+      "size": {
+        "x": 14,
+        "y": 0.25,
+        "z": 12
+      },
+      "material_id": "ceiling-matte"
+    },
+    {
+      "id": "wall-back",
+      "type": "box",
+      "position": {
+        "x": 0,
+        "y": 2.9,
+        "z": -6.2
+      },
+      "size": {
+        "x": 14,
+        "y": 5.8,
+        "z": 0.3
+      },
+      "material_id": "wall-neutral"
+    },
+    {
+      "id": "wall-left",
+      "type": "box",
+      "position": {
+        "x": -7,
+        "y": 2.9,
+        "z": -0.5
+      },
+      "size": {
+        "x": 0.3,
+        "y": 5.8,
+        "z": 12
+      },
+      "material_id": "wall-warm"
+    },
+    {
+      "id": "wall-right",
+      "type": "box",
+      "position": {
+        "x": 7,
+        "y": 2.9,
+        "z": -0.5
+      },
+      "size": {
+        "x": 0.3,
+        "y": 5.8,
+        "z": 12
+      },
+      "material_id": "wall-cool"
+    },
+    {
+      "id": "plinth-center",
+      "type": "box",
+      "position": {
+        "x": 0.0,
+        "y": 0.4,
+        "z": -1.0
+      },
+      "size": {
+        "x": 1.6,
+        "y": 0.8,
+        "z": 1.6
+      },
+      "material_id": "stone"
+    },
+    {
+      "id": "plinth-left",
+      "type": "box",
+      "position": {
+        "x": -2.4,
+        "y": 0.3,
+        "z": 0.3
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0.6,
+        "z": 1.2
+      },
+      "material_id": "stone"
+    },
+    {
+      "id": "plinth-right",
+      "type": "box",
+      "position": {
+        "x": 2.4,
+        "y": 0.3,
+        "z": 0.3
+      },
+      "size": {
+        "x": 1.2,
+        "y": 0.6,
+        "z": 1.2
+      },
+      "material_id": "stone"
+    },
+    {
+      "id": "hero-glass",
+      "type": "sphere",
+      "position": {
+        "x": 0.0,
+        "y": 1.65,
+        "z": -1.0
+      },
+      "size": {
+        "x": 0.85,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "glass-crystal"
+    },
+    {
+      "id": "sphere-gold",
+      "type": "sphere",
+      "position": {
+        "x": -2.4,
+        "y": 1.25,
+        "z": 0.3
+      },
+      "size": {
+        "x": 0.65,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-gold"
+    },
+    {
+      "id": "sphere-chrome",
+      "type": "sphere",
+      "position": {
+        "x": 2.4,
+        "y": 1.25,
+        "z": 0.3
+      },
+      "size": {
+        "x": 0.65,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-chrome"
+    },
+    {
+      "id": "sphere-copper",
+      "type": "sphere",
+      "position": {
+        "x": -4.0,
+        "y": 0.5,
+        "z": 1.8
+      },
+      "size": {
+        "x": 0.5,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "metal-copper-rough"
+    },
+    {
+      "id": "sphere-velvet",
+      "type": "sphere",
+      "position": {
+        "x": 4.0,
+        "y": 0.45,
+        "z": 1.6
+      },
+      "size": {
+        "x": 0.45,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "lambert-velvet"
+    },
+    {
+      "id": "cube-emerald",
+      "type": "box",
+      "position": {
+        "x": -1.1,
+        "y": 0.5,
+        "z": 1.7
+      },
+      "size": {
+        "x": 0.85,
+        "y": 0.85,
+        "z": 0.85
+      },
+      "material_id": "glass-emerald"
+    },
+    {
+      "id": "cube-ruby",
+      "type": "box",
+      "position": {
+        "x": 1.15,
+        "y": 0.5,
+        "z": 1.85
+      },
+      "size": {
+        "x": 0.8,
+        "y": 0.8,
+        "z": 0.8
+      },
+      "material_id": "glass-ruby"
+    },
+    {
+      "id": "mirror-slab",
+      "type": "box",
+      "position": {
+        "x": 0.0,
+        "y": 2.2,
+        "z": -5.95
+      },
+      "size": {
+        "x": 4.5,
+        "y": 2.6,
+        "z": 0.06
+      },
+      "material_id": "mirror"
+    },
+    {
+      "id": "box-silver",
+      "type": "box",
+      "position": {
+        "x": -4.6,
+        "y": 0.75,
+        "z": -2.0
+      },
+      "size": {
+        "x": 0.9,
+        "y": 1.5,
+        "z": 0.4
+      },
+      "material_id": "metal-silver"
+    },
+    {
+      "id": "light-key",
+      "type": "sphere_light",
+      "position": {
+        "x": 0.0,
+        "y": 5.15,
+        "z": -3.2
+      },
+      "size": {
+        "x": 0.7,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-key"
+    },
+    {
+      "id": "light-magenta",
+      "type": "sphere_light",
+      "position": {
+        "x": -4.5,
+        "y": 4.4,
+        "z": -2.0
+      },
+      "size": {
+        "x": 0.45,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-magenta"
+    },
+    {
+      "id": "light-cyan",
+      "type": "sphere_light",
+      "position": {
+        "x": 4.5,
+        "y": 4.4,
+        "z": -2.0
+      },
+      "size": {
+        "x": 0.45,
+        "y": 0,
+        "z": 0
+      },
+      "material_id": "light-cyan"
+    }
+  ],
+  "materials": [
+    {
+      "id": "floor-lambert",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.62,
+        "g": 0.62,
+        "b": 0.64
+      },
+      "rough": 0.7,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "ceiling-matte",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.45,
+        "g": 0.45,
+        "b": 0.47
+      },
+      "rough": 0.85,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-neutral",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.42,
+        "g": 0.42,
+        "b": 0.45
+      },
+      "rough": 0.75,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-warm",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.65,
+        "g": 0.28,
+        "b": 0.2
+      },
+      "rough": 0.7,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "wall-cool",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.2,
+        "g": 0.35,
+        "b": 0.65
+      },
+      "rough": 0.7,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "stone",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.18,
+        "g": 0.18,
+        "b": 0.19
+      },
+      "rough": 0.9,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "lambert-velvet",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.5,
+        "g": 0.1,
+        "b": 0.28
+      },
+      "rough": 0.95,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "metal-gold",
+      "type": "metal",
+      "albedo": {
+        "r": 1.0,
+        "g": 0.72,
+        "b": 0.28
+      },
+      "rough": 0.03,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0.97,
+      "reflectivity": 1.0
+    },
+    {
+      "id": "metal-chrome",
+      "type": "metal",
+      "albedo": {
+        "r": 0.92,
+        "g": 0.93,
+        "b": 0.95
+      },
+      "rough": 0.04,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0.96,
+      "reflectivity": 1.0
+    },
+    {
+      "id": "metal-copper-rough",
+      "type": "metal",
+      "albedo": {
+        "r": 0.92,
+        "g": 0.52,
+        "b": 0.32
+      },
+      "rough": 0.4,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0.5,
+      "reflectivity": 0.88
+    },
+    {
+      "id": "metal-silver",
+      "type": "metal",
+      "albedo": {
+        "r": 0.94,
+        "g": 0.94,
+        "b": 0.97
+      },
+      "rough": 0.08,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "smoothness": 0.9,
+      "reflectivity": 0.95
+    },
+    {
+      "id": "mirror",
+      "type": "mirror",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.96,
+        "b": 0.98
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "glass-crystal",
+      "type": "dielectric",
+      "albedo": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "rough": 0,
+      "ior": 1.5,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0.02,
+        "g": 0.015,
+        "b": 0.025
+      },
+      "tint": {
+        "r": 0.98,
+        "g": 0.99,
+        "b": 1.0
+      },
+      "absorption_scale": 0.015
+    },
+    {
+      "id": "glass-emerald",
+      "type": "dielectric",
+      "albedo": {
+        "r": 0.85,
+        "g": 1.0,
+        "b": 0.9
+      },
+      "rough": 0,
+      "ior": 1.5,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0.1,
+        "g": 0.02,
+        "b": 0.07
+      },
+      "tint": {
+        "r": 0.7,
+        "g": 1.0,
+        "b": 0.82
+      },
+      "absorption_scale": 0.04
+    },
+    {
+      "id": "glass-ruby",
+      "type": "dielectric",
+      "albedo": {
+        "r": 1.0,
+        "g": 0.88,
+        "b": 0.88
+      },
+      "rough": 0,
+      "ior": 1.52,
+      "emit": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "power": 0,
+      "absorption": {
+        "r": 0.02,
+        "g": 0.12,
+        "b": 0.14
+      },
+      "tint": {
+        "r": 1.0,
+        "g": 0.7,
+        "b": 0.68
+      },
+      "absorption_scale": 0.045
+    },
+    {
+      "id": "light-key",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 8.0,
+        "g": 7.4,
+        "b": 6.6
+      },
+      "power": 1.0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-magenta",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 6.5,
+        "g": 0.8,
+        "b": 4.5
+      },
+      "power": 1.0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    },
+    {
+      "id": "light-cyan",
+      "type": "emissive",
+      "albedo": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      },
+      "rough": 0,
+      "ior": 1,
+      "emit": {
+        "r": 0.8,
+        "g": 4.5,
+        "b": 7.5
+      },
+      "power": 1.0,
+      "absorption": {
+        "r": 0,
+        "g": 0,
+        "b": 0
+      }
+    }
+  ],
+  "settings": {
+    "width": 2560,
+    "height": 1440,
+    "samplesPerPx": 1000,
+    "maxDepth": 24,
+    "maxRayDist": 100
+  },
+  "sky": {
+    "type": "gradient",
+    "horizon": {
+      "r": 0.12,
+      "g": 0.12,
+      "b": 0.16
+    },
+    "zenith": {
+      "r": 0.03,
+      "g": 0.035,
+      "b": 0.06
+    }
+  },
+  "background": {
+    "r": 0.03,
+    "g": 0.035,
+    "b": 0.06
+  },
+  "fog": null
+}

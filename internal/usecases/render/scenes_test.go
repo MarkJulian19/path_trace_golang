@@ -14,6 +14,16 @@ import (
 func TestBundledScenesRenderAndRoundTrip(t *testing.T) {
 	t.Parallel()
 	paths, err := filepath.Glob("../../../scenes/*.json")
+	validationPaths, validationErr := filepath.Glob("../../../scenes/validation/*.json")
+	if validationErr != nil {
+		t.Fatal(validationErr)
+	}
+	paths = append(paths, validationPaths...)
+	galleryPaths, galleryErr := filepath.Glob("../../../scenes/gallery/*.json")
+	if galleryErr != nil {
+		t.Fatal(galleryErr)
+	}
+	paths = append(paths, galleryPaths...)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,15 +38,15 @@ func packMaterials(materials []scene.Material) []float32 {
 		base := i * gpuMaterialStride
 		data[base] = gpuMaterialType(material.Type)
 		data[base+1] = float32(material.Rough)
-		data[base+2] = float32(material.IOR)
+		data[base+2] = float32(materialIOR(material))
 		data[base+3] = float32(materialSmoothness(material))
-		data[base+4] = float32(material.Albedo.R)
-		data[base+5] = float32(material.Albedo.G)
-		data[base+6] = float32(material.Albedo.B)
+		data[base+4] = float32(clampFloat(material.Albedo.R, 0, 1))
+		data[base+5] = float32(clampFloat(material.Albedo.G, 0, 1))
+		data[base+6] = float32(clampFloat(material.Albedo.B, 0, 1))
 		data[base+7] = float32(materialReflectivity(material))
-		data[base+8] = float32(material.Emit.R * material.Power)
-		data[base+9] = float32(material.Emit.G * material.Power)
-		data[base+10] = float32(material.Emit.B * material.Power)
+		data[base+8] = float32(max(0, material.Emit.R) * max(0, material.Power))
+		data[base+9] = float32(max(0, material.Emit.G) * max(0, material.Power))
+		data[base+10] = float32(max(0, material.Emit.B) * max(0, material.Power))
 		data[base+12] = float32(material.Absorption.R)
 		data[base+13] = float32(material.Absorption.G)
 		data[base+14] = float32(material.Absorption.B)
@@ -78,7 +78,7 @@ func gpuMaterialType(materialType scene.MaterialType) float32 {
 
 func materialSmoothness(material scene.Material) float64 {
 	value := material.Smoothness
-	if value == 0 && material.Type == scene.MaterialMetal {
+	if value == 0 && (material.Type == scene.MaterialMetal || material.Type == scene.MaterialMirror) {
 		value = gpuUnitValue - material.Rough
 	}
 	return clampFloat(value, 0, gpuUnitValue)
@@ -86,7 +86,7 @@ func materialSmoothness(material scene.Material) float64 {
 
 func materialReflectivity(material scene.Material) float64 {
 	value := material.Reflectivity
-	if value == 0 && material.Type == scene.MaterialMetal {
+	if value == 0 && (material.Type == scene.MaterialMetal || material.Type == scene.MaterialMirror) {
 		value = gpuUnitValue
 	}
 	return clampFloat(value, 0, gpuUnitValue)
@@ -201,3 +201,12 @@ func packSky(sc *scene.Scene) [16]float32 {
 		zenith[0], zenith[1], zenith[2], zenith[3],
 	}
 }
+
+func materialIOR(material scene.Material) float64 {
+	if material.IOR <= 0 {
+		return gpuDefaultIOR
+	}
+	return material.IOR
+}
+
+const gpuDefaultIOR = 1.5

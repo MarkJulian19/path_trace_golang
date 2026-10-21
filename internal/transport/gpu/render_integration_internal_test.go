@@ -1,11 +1,14 @@
 package gpu
 
 import (
+	"bytes"
 	"image"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-gl/gl/v3.3-core/gl"
 
@@ -14,11 +17,15 @@ import (
 	"github.com/MarkJulian19/path_trace_golang/internal/repository/scenejson"
 )
 
+var gpuIntegrationMu sync.Mutex
+
 func TestGPUIntegration(t *testing.T) {
 	t.Parallel()
 	if os.Getenv("PATHTRACER_GPU_INTEGRATION") != "1" {
 		t.Skip("set PATHTRACER_GPU_INTEGRATION=1 to run with an OpenGL 4.3 display")
 	}
+	gpuIntegrationMu.Lock()
+	defer gpuIntegrationMu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	SetLivePreview(true)
@@ -47,6 +54,7 @@ func TestGPUIntegration(t *testing.T) {
 	}{
 		{name: "normal first frame", spp: 1, width: 65, live: true},
 		{name: "wireframe after normal", spp: 1, mode: 1, width: 65, live: true},
+		{name: "wireframe ignores path sample budget", spp: 17, mode: 1, width: 65, live: true},
 		{name: "normal after wireframe", spp: 5, width: 65, live: true},
 		{name: "temporal final readback", spp: 5, width: 65, temporal: true},
 		{name: "temporal live readback", spp: 5, width: 65, live: true, temporal: true},
@@ -83,9 +91,68 @@ func TestGPUIntegration(t *testing.T) {
 		}
 	}
 	checkGPUCancellation(t, r, sc)
+	checkGPUCancellationWithinPass(t, r, sc)
+	checkGPUAdaptiveTiling(t, r, sc)
 	checkGPUMaterials(t, r, sc)
 	checkGPUEmptyScene(t, r)
 	checkGPUBundledScenes(t, r)
+}
+
+func checkGPUAdaptiveTiling(t *testing.T, r *gpuRenderer, sc *scene.Scene) {
+	t.Helper()
+	previousLimit := gpuTileSize.Load()
+	defer gpuTileSize.Store(previousLimit)
+	cfg := renderentity.Config{Width: 257, Height: 193, SamplesPerPx: 9, MaxDepth: 4, Seed: 987}
+	var reference []byte
+	for _, limit := range []int64{32, 512} {
+		gpuTileSize.Store(limit)
+		img := image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
+		err := r.renderOnce(sc, cfg, img, nil, func() bool { return false })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reference == nil {
+			reference = bytes.Clone(img.Pix)
+		} else if !bytes.Equal(reference, img.Pix) {
+			t.Fatal("adaptive tiles overlap, leave gaps, or change per-pixel sample streams")
+		}
+	}
+}
+
+func checkGPUCancellationWithinPass(t *testing.T, r *gpuRenderer, sc *scene.Scene) {
+	t.Helper()
+	SetRenderModeFromUI(0)
+	SetRenderCancel(false)
+	warmConfig := renderentity.Config{Width: 32, Height: 32, SamplesPerPx: 1, MaxDepth: 16}
+	warmImage := image.NewRGBA(image.Rect(0, 0, warmConfig.Width, warmConfig.Height))
+	err := r.renderOnce(sc, warmConfig, warmImage, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := renderentity.Config{Width: 512, Height: 512, SamplesPerPx: 4096, MaxDepth: 16, Seed: 1}
+	img := image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
+	state, ok := r.prepareGPUFrame(sc, cfg, img, false, nil)
+	if !ok {
+		t.Fatal("failed to prepare cancellation probe")
+	}
+	started := time.Now()
+	request := newGPUSampleRequest(state, cfg, img, nil, func() bool {
+		return time.Since(started) >= 50*time.Millisecond
+	})
+	stats := r.renderSamples(request)
+	if !stats.cancelled || time.Since(started) > 2*time.Second {
+		t.Fatalf(
+			"GPU cancellation stalled inside a pass: cancelled=%v elapsed=%s",
+			stats.cancelled,
+			time.Since(started),
+		)
+	}
+	drainStarted := time.Now()
+	gl.Finish()
+	if elapsed := time.Since(drainStarted); elapsed > 250*time.Millisecond {
+		t.Fatalf("cancelled GPU request left queued work: drain=%s", elapsed)
+	}
+	t.Logf("GPU cancellation including dispatch drain: %s", time.Since(started))
 }
 
 func checkGPUMaterials(t *testing.T, r *gpuRenderer, base *scene.Scene) {
@@ -162,6 +229,16 @@ func checkGPUEmptyScene(t *testing.T, r *gpuRenderer) {
 func checkGPUBundledScenes(t *testing.T, r *gpuRenderer) {
 	t.Helper()
 	paths, err := filepath.Glob("../../../scenes/*.json")
+	validationPaths, validationErr := filepath.Glob("../../../scenes/validation/*.json")
+	if validationErr != nil {
+		t.Fatal(validationErr)
+	}
+	paths = append(paths, validationPaths...)
+	galleryPaths, galleryErr := filepath.Glob("../../../scenes/gallery/*.json")
+	if galleryErr != nil {
+		t.Fatal(galleryErr)
+	}
+	paths = append(paths, galleryPaths...)
 	if err != nil || len(paths) == 0 {
 		t.Fatalf("find bundled scenes: paths=%v err=%v", paths, err)
 	}

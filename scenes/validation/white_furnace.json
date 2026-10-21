@@ -1,0 +1,143 @@
+{
+  "name": "Validation: unit radiance white furnace",
+  "camera": {
+    "position": {
+      "x": 0,
+      "y": 1,
+      "z": 7
+    },
+    "target": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 40,
+    "aperture": 0,
+    "focusDist": 7,
+    "aspectRatio": 1.7777777777777777
+  },
+  "materials": [
+    {
+      "id": "white",
+      "type": "lambert",
+      "albedo": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "mirror",
+      "type": "mirror",
+      "albedo": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "reflectivity": 1
+    },
+    {
+      "id": "clear",
+      "type": "dielectric",
+      "ior": 1.5,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "rough",
+      "type": "metal",
+      "albedo": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "smoothness": 0.4,
+      "reflectivity": 1
+    }
+  ],
+  "objects": [
+    {
+      "id": "lambert",
+      "type": "sphere",
+      "material_id": "white",
+      "position": {
+        "x": -2.1,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0.65,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "mirror",
+      "type": "sphere",
+      "material_id": "mirror",
+      "position": {
+        "x": -0.7,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0.65,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "glass",
+      "type": "sphere",
+      "material_id": "clear",
+      "position": {
+        "x": 0.7,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0.65,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "rough",
+      "type": "sphere",
+      "material_id": "rough",
+      "position": {
+        "x": 2.1,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0.65,
+        "y": 0,
+        "z": 0
+      }
+    }
+  ],
+  "sky": {
+    "type": "solid",
+    "color": {
+      "r": 1,
+      "g": 1,
+      "b": 1
+    }
+  },
+  "settings": {
+    "width": 320,
+    "height": 180,
+    "samplesPerPx": 64,
+    "maxDepth": 24,
+    "maxRayDist": 100
+  }
+}

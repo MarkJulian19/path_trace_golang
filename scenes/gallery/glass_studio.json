@@ -1,0 +1,284 @@
+{
+  "name": "Gallery: clear, amber and blue glass studio",
+  "camera": {
+    "position": {
+      "x": 6,
+      "y": 2.8,
+      "z": 8
+    },
+    "target": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "up": {
+      "x": 0,
+      "y": 1,
+      "z": 0
+    },
+    "fov": 42,
+    "aperture": 0,
+    "focusDist": 10,
+    "aspectRatio": 1.7777777777777777
+  },
+  "background": {
+    "r": 0.005,
+    "g": 0.005,
+    "b": 0.005
+  },
+  "sky": {
+    "type": "solid",
+    "color": {
+      "r": 0.005,
+      "g": 0.005,
+      "b": 0.005
+    }
+  },
+  "materials": [
+    {
+      "id": "floor",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.22,
+        "g": 0.22,
+        "b": 0.22
+      }
+    },
+    {
+      "id": "wall",
+      "type": "lambert",
+      "albedo": {
+        "r": 0.065,
+        "g": 0.065,
+        "b": 0.065
+      }
+    },
+    {
+      "id": "glass",
+      "type": "dielectric",
+      "ior": 1.5,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      }
+    },
+    {
+      "id": "amber",
+      "type": "dielectric",
+      "ior": 1.5,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "absorption": {
+        "r": 0.04,
+        "g": 0.65,
+        "b": 1.8
+      },
+      "absorptionScale": 1
+    },
+    {
+      "id": "blue",
+      "type": "dielectric",
+      "ior": 1.5,
+      "tint": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "absorption": {
+        "r": 1.3,
+        "g": 0.35,
+        "b": 0.03
+      },
+      "absorptionScale": 1
+    },
+    {
+      "id": "silver",
+      "type": "metal",
+      "albedo": {
+        "r": 0.95,
+        "g": 0.95,
+        "b": 0.95
+      },
+      "smoothness": 0.985,
+      "reflectivity": 1
+    },
+    {
+      "id": "overhead",
+      "type": "emissive",
+      "emit": {
+        "r": 1,
+        "g": 1,
+        "b": 1
+      },
+      "power": 9
+    },
+    {
+      "id": "warm",
+      "type": "emissive",
+      "emit": {
+        "r": 1,
+        "g": 0.8,
+        "b": 0.6
+      },
+      "power": 12
+    },
+    {
+      "id": "cool",
+      "type": "emissive",
+      "emit": {
+        "r": 0.55,
+        "g": 0.8,
+        "b": 1
+      },
+      "power": 9
+    }
+  ],
+  "objects": [
+    {
+      "id": "floor",
+      "type": "plane",
+      "materialId": "floor",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "size": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "back",
+      "type": "box",
+      "materialId": "wall",
+      "position": {
+        "x": 0,
+        "y": 3,
+        "z": -4
+      },
+      "size": {
+        "x": 14,
+        "y": 6,
+        "z": 0.2
+      }
+    },
+    {
+      "id": "clear",
+      "type": "sphere",
+      "materialId": "glass",
+      "position": {
+        "x": -2.2,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 1,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "amber",
+      "type": "sphere",
+      "materialId": "amber",
+      "position": {
+        "x": 0,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 1,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "blue",
+      "type": "sphere",
+      "materialId": "blue",
+      "position": {
+        "x": 2.2,
+        "y": 1,
+        "z": 0
+      },
+      "size": {
+        "x": 1,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "silver",
+      "type": "sphere",
+      "materialId": "silver",
+      "position": {
+        "x": 0,
+        "y": 0.55,
+        "z": 2
+      },
+      "size": {
+        "x": 0.55,
+        "y": 0,
+        "z": 0
+      }
+    },
+    {
+      "id": "softbox-top",
+      "type": "box",
+      "materialId": "overhead",
+      "position": {
+        "x": 0,
+        "y": 5,
+        "z": -1
+      },
+      "size": {
+        "x": 6,
+        "y": 0.1,
+        "z": 3
+      }
+    },
+    {
+      "id": "softbox-side",
+      "type": "box",
+      "materialId": "warm",
+      "position": {
+        "x": -4,
+        "y": 3,
+        "z": 1
+      },
+      "size": {
+        "x": 0.1,
+        "y": 4,
+        "z": 4
+      }
+    },
+    {
+      "id": "softbox-rim",
+      "type": "box",
+      "materialId": "cool",
+      "position": {
+        "x": 3,
+        "y": 3,
+        "z": -3
+      },
+      "size": {
+        "x": 3,
+        "y": 4,
+        "z": 0.1
+      }
+    }
+  ],
+  "settings": {
+    "width": 2560,
+    "height": 1440,
+    "samplesPerPx": 1000,
+    "maxDepth": 24,
+    "maxRayDist": 100
+  }
+}

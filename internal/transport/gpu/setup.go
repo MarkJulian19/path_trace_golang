@@ -17,6 +17,7 @@ type gpuFrameState struct {
 	tmp            []float32
 	pixelCount     int
 	passes         int
+	batchSize      int
 	updateInterval int
 
 	uniforms         gpuUniforms
@@ -41,6 +42,7 @@ func (r *gpuRenderer) prepareGPUFrame(
 	pixelCount = min(pixelCount, len(img.Pix)/gpuRGBAComponents)
 	gpuLogf("begin mats=%d objs=%d", len(sc.Materials), len(sc.Objects))
 	sceneData := prepareGPUScene(sc, cfg)
+	r.dispatchTile = min(gpuInitialDispatchTileSize, dispatchTileSize())
 	r.pboPending = false
 	r.resizeGPUResources(cfg, pixelCount)
 	r.uploadGPUScene(sceneData)
@@ -56,6 +58,7 @@ func (r *gpuRenderer) prepareGPUFrame(
 	return gpuFrameState{
 		pixelCount:       pixelCount,
 		passes:           samplePasses(isWireframe, cfg.SamplesPerPx),
+		batchSize:        samplesPerPass(),
 		updateInterval:   sampleUpdateInterval(pixelCount, wantLiveReadback),
 		isWireframe:      isWireframe,
 		wantLiveReadback: wantLiveReadback,
@@ -68,7 +71,7 @@ func samplePasses(isWireframe bool, samplesPerPixel int) int {
 	if isWireframe {
 		return 1
 	}
-	return max(samplesPerPixel, 1)
+	return dispatchGroups(max(samplesPerPixel, 1), samplesPerPass())
 }
 
 func applyPostprocess(img *image.RGBA, cfg renderentity.Config) {
@@ -106,11 +109,9 @@ func (r *gpuRenderer) resizeGPUResources(cfg renderentity.Config, pixelCount int
 	pboSize := cfg.Width * cfg.Height * gpuRGBAComponents * gpuFloatBytes
 	r.resizePBOs(pboSize)
 	accumSize := pixelCount * gpuRGBComponents * gpuFloatBytes
-	varianceSize := pixelCount * gpuVarianceComponents * gpuFloatBytes
 	resizeSSBO(r.accumSSBO, accumSize, pixelCount*gpuRGBComponents)
-	resizeSSBO(r.varianceSSBO, varianceSize, pixelCount*gpuVarianceComponents)
 	gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
-	gpuLogf("resized GPU buffers to %dx%d (accum=%dB variance=%dB)", cfg.Width, cfg.Height, accumSize, varianceSize)
+	gpuLogf("resized GPU buffers to %dx%d (accum=%dB)", cfg.Width, cfg.Height, accumSize)
 }
 
 func (r *gpuRenderer) resizeTextures(cfg renderentity.Config) {
@@ -125,7 +126,7 @@ func setTextureSize(texture uint32, cfg renderentity.Config) {
 	gl.TexImage2D(
 		gl.TEXTURE_2D,
 		0,
-		gl.RGBA16F,
+		gl.RGBA32F,
 		glInt32(cfg.Width),
 		glInt32(cfg.Height),
 		0,
@@ -247,12 +248,10 @@ func (r *gpuRenderer) configureGPUProgram(cfg renderentity.Config, isWireframe b
 		program = r.wireframeProgram
 	}
 	gl.UseProgram(program)
-	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA16F)
+	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA32F)
 	r.bindPreviousFrameTexture(isWireframe)
 	gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, gpuAccumBinding, r.accumSSBO)
-	if !isWireframe {
-		gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, gpuVarianceBinding, r.varianceSSBO)
-	}
+
 	r.cacheUniforms(program)
 	r.setPreviousFrameSampler(isWireframe)
 	temporal := int32(0)
@@ -301,7 +300,6 @@ func (r *gpuRenderer) setPreviousFrameSampler(isWireframe bool) {
 func clearAccumulationBuffers(r *gpuRenderer, pixelCount int) {
 	timer := startGPUTimer("clear_ssbo")
 	clearSizedSSBO(r.accumSSBO, pixelCount*gpuRGBComponents*gpuFloatBytes, pixelCount*gpuRGBComponents)
-	clearSizedSSBO(r.varianceSSBO, pixelCount*gpuVarianceComponents*gpuFloatBytes, pixelCount*gpuVarianceComponents)
 	timer.stop()
 }
 

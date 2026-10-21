@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// randSource is a lightweight wrapper around math/rand.Rand.
-// It is not safe for concurrent use, so each goroutine must have its own instance.
+// randSource хранит локальное состояние xorshift64 без общего доступа между работниками.
 type randSource struct {
 	state uint64
 }
@@ -37,4 +36,22 @@ func (rs *randSource) Float64() float64 {
 	rs.state ^= rs.state >> renderRandomShiftB
 	rs.state ^= rs.state << renderRandomShiftC
 	return float64(rs.state>>renderRandomMantissaShift) * (1.0 / renderRandomMantissaScale)
+}
+
+func (rs *randSource) startPixelSample(seed uint64, pixel, sample int) {
+	if seed == 0 {
+		return
+	}
+	const (
+		shiftA    = 30
+		shiftB    = 27
+		shiftC    = 31
+		finishMix = 0x94d049bb133111eb
+	)
+	const pixelMix = 0x9e3779b97f4a7c15
+	const sampleMix = 0xbf58476d1ce4e5b9
+	x := seed + uint64(max(pixel, 0))*pixelMix + uint64(max(sample, 0))*sampleMix
+	x = (x ^ (x >> shiftA)) * sampleMix
+	x = (x ^ (x >> shiftB)) * finishMix
+	rs.state = (x ^ (x >> shiftC)) | 1
 }

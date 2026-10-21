@@ -9,8 +9,16 @@ fyne-cross/
 *.dylib
 
 # Local outputs
+/output/
 /output.png
 /ui_render*.png
+
+# LaTeX build outputs (keep the .tex source and published .pdf)
+/docs/math/*.aux
+/docs/math/*.fdb_latexmk
+/docs/math/*.fls
+/docs/math/*.log
+/docs/math/*.synctex.gz
 
 # Archives / junk
 *.rar

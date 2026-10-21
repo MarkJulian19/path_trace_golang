@@ -58,75 +58,14 @@ func refractVec(uv, n vec3, etaiOverEtat float64) vec3 {
 	rOutPerpZ *= etaiOverEtat
 
 	perpLenSq := rOutPerpX*rOutPerpX + rOutPerpY*rOutPerpY + rOutPerpZ*rOutPerpZ
-	rOutParallel := -math.Sqrt(math.Abs(1.0 - perpLenSq))
+	if perpLenSq > 1 {
+		return reflectVec(uv, n)
+	}
+	rOutParallel := -math.Sqrt(max(0, 1.0-perpLenSq))
 	return vec3{
 		x: rOutPerpX + n.x*rOutParallel,
 		y: rOutPerpY + n.y*rOutParallel,
 		z: rOutPerpZ + n.z*rOutParallel,
-	}
-}
-
-func randomInUnitSphere(rng *randSource) vec3 {
-	// Оптимизированная версия с меньшим количеством вызовов функций
-	// Защита от nil rng
-	if rng == nil {
-		// Fallback: возвращаем случайное направление без использования rng
-		// Это не должно происходить в нормальной работе, но защищает от паники
-		return vec3{x: 0, y: 0, z: 1}
-	}
-	for {
-		x := rng.Float64()*2 - 1
-		y := rng.Float64()*2 - 1
-		z := rng.Float64()*2 - 1
-		// Проверка длины без создания vec3
-		lenSq := x*x + y*y + z*z
-		if lenSq >= 1.0 {
-			continue
-		}
-		return vec3{x: x, y: y, z: z}
-	}
-}
-
-// randomCosineDirection generates a random direction on the hemisphere
-// with cosine-weighted distribution relative to the normal.
-// This is the correct distribution for Lambertian (diffuse) materials in path tracing.
-func randomCosineDirection(normal vec3, rng *randSource) vec3 {
-	// Generate a random point in unit sphere
-	r1 := rng.Float64()
-	r2 := rng.Float64()
-
-	// Spherical coordinates for cosine-weighted hemisphere sampling
-	phi := renderViewportDiameter * math.Pi * r1
-	cosTheta := math.Sqrt(r2)
-	sinTheta := math.Sqrt(1.0 - r2)
-	sinPhi, cosPhi := math.Sincos(phi)
-
-	// Create a local coordinate system aligned with the normal
-	// Choose an arbitrary vector not parallel to normal
-	w := normal
-	var u vec3
-	if math.Abs(normal.x) > renderEdgeThreshold {
-		u = v(0, 1, 0)
-	} else {
-		u = v(1, 0, 0)
-	}
-
-	// Build orthonormal basis
-	vVec := w.cross(u).unit()
-	uVec := vVec.cross(w)
-
-	// Generate direction in local coordinate system
-	localDir := vec3{
-		x: sinTheta * cosPhi,
-		y: sinTheta * sinPhi,
-		z: cosTheta,
-	}
-
-	// Transform to world space
-	return vec3{
-		x: localDir.x*uVec.x + localDir.y*vVec.x + localDir.z*w.x,
-		y: localDir.x*uVec.y + localDir.y*vVec.y + localDir.z*w.y,
-		z: localDir.x*uVec.z + localDir.y*vVec.z + localDir.z*w.z,
 	}
 }
 

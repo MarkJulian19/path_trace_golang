@@ -26,7 +26,7 @@ func (c *renderController) captureSnapshot(job *renderJob) (renderSnapshot, bool
 			return
 		}
 		live := c.livePreview.Load()
-		c.configureGPU(live)
+		c.configureRenderer(live)
 		ready <- renderSnapshot{
 			scene: cloneScene(c.sc), cfg: c.config(job.final), interval: c.wireframeFrameDuration(),
 			backend: c.service.GetBackend(), wireframe: isWireframeMode(c.service), live: live,

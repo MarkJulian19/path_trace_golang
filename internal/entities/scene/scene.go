@@ -63,9 +63,9 @@ type Material struct {
 	Reflectivity float64 // for metals: 0.0-1.0, controls reflection intensity (default: 1.0)
 
 	// Advanced parameters for dielectrics (glass).
-	Tint Color // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
+	Tint Color // linear RGB transmission per scene unit (default: 1,1,1 = no tint)
 
-	AbsorptionScale float64 // for dielectric: scale factor for absorption coefficient (default: 0.01, units are in cm)
+	AbsorptionScale float64 // scales absorption per scene unit; default 0.01 for legacy scenes
 }
 
 // ObjectType задаёт поддерживаемый тип геометрического примитива.
@@ -111,8 +111,8 @@ type Fog struct {
 	// Если заданы SigmaS/SigmaA, то Density рассматривается как базовая экстинкция и может быть 0.
 	Density float64 // 0 = нет тумана, >0 = базовая экстинкция
 
-	// Насколько сильно туман рассеивает свет в сторону камеры (0..1).
-	// При 0 — чистое поглощение, при 1 — сильные видимые лучи. Используется как множитель для SigmaS.
+	// Доля рассеяния (0..1) при выводе коэффициентов из Density.
+	// Явные SigmaS/SigmaA имеют приоритет.
 	Scatter float64
 
 	// Физические коэффициенты объёмной среды (опционально).

@@ -4,6 +4,7 @@ import "image"
 
 // Config задаёт параметры построения одного кадра.
 type Config struct {
+	Seed         uint64 // 0 сохраняет случайную инициализацию; ненулевое значение воспроизводит кадр.
 	Width        int
 	Height       int
 	SamplesPerPx int

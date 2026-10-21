@@ -168,3 +168,20 @@ func TestCloneSceneOwnsEditableData(t *testing.T) {
 		t.Fatal("render snapshot shares editable data with the scene")
 	}
 }
+
+func TestProgressRefreshWithoutLivePreview(t *testing.T) {
+	t.Parallel()
+	c := &renderController{}
+	state := &renderProgressState{
+		cfg: engine.Config{Width: 2560, Height: 1440}, last: time.Now().Add(-time.Second),
+	}
+	if !c.shouldRefresh(state, 1, 100) {
+		t.Fatal("2K render with live preview disabled stopped updating progress and elapsed time")
+	}
+	if c.shouldRefresh(state, 2, 100) {
+		t.Fatal("progress updates are not throttled")
+	}
+	if !c.shouldRefresh(state, 100, 100) {
+		t.Fatal("final progress update was suppressed")
+	}
+}

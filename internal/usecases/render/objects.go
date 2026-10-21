@@ -82,30 +82,19 @@ func (s *sphere) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	rec.p.y = r.orig.y + r.dir.y*root
 	rec.p.z = r.orig.z + r.dir.z*root
 
-	// Оптимизация: прямое вычисление нормали
-	invRadius := 1.0 / s.radius
-	outwardNormalX := (rec.p.x - s.center.x) * invRadius
-	outwardNormalY := (rec.p.y - s.center.y) * invRadius
-	outwardNormalZ := (rec.p.z - s.center.z) * invRadius
-
-	// Оптимизация: прямое вычисление frontFace и normal
-	dot := r.dir.x*outwardNormalX + r.dir.y*outwardNormalY + r.dir.z*outwardNormalZ
-	rec.frontFace = dot < 0
-	if rec.frontFace {
-		rec.normal.x = outwardNormalX
-		rec.normal.y = outwardNormalY
-		rec.normal.z = outwardNormalZ
-	} else {
-		rec.normal.x = -outwardNormalX
-		rec.normal.y = -outwardNormalY
-		rec.normal.z = -outwardNormalZ
-	}
+	// Нормализуем и восстанавливаем поверхность до смещения вторичного луча.
+	outwardNormal := rec.p.sub(s.center).unit()
+	rec.p = s.center.add(outwardNormal.mul(s.radius))
+	rec.setFaceNormal(r, outwardNormal)
 	rec.mat = &s.mat
 	return true
 }
 
 func sphereRoot(a, halfB, c, tMin, tMax float64) (float64, bool) {
-	discriminant := halfB*halfB - a*c
+	if a <= 0 {
+		return 0, false
+	}
+	discriminant := math.FMA(-a, c, halfB*halfB)
 	if discriminant < 0 {
 		return 0, false
 	}
@@ -142,7 +131,7 @@ func (p *plane) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	rec.t = t
 	// Оптимизация: прямое вычисление точки
 	rec.p.x = r.orig.x + r.dir.x*t
-	rec.p.y = r.orig.y + r.dir.y*t
+	rec.p.y = p.point.y
 	rec.p.z = r.orig.z + r.dir.z*t
 
 	// Оптимизация: прямое вычисление frontFace и normal
@@ -168,8 +157,8 @@ func (b *box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 }
 
 func (b *box) hitWithMode(r ray, tMin, tMax float64, rec *hitRecord, findExit bool) bool {
-	t0 := tMin
-	t1 := tMax
+	t0 := math.Inf(-1)
+	t1 := math.Inf(1)
 
 	var ok bool
 	t0, t1, ok = updateBoxInterval(t0, t1, b.min.x, b.max.x, r.orig.x, r.dir.x)
@@ -185,25 +174,46 @@ func (b *box) hitWithMode(r ray, tMin, tMax float64, rec *hitRecord, findExit bo
 		return false
 	}
 
-	rec.t = t0
-	if findExit {
-		rec.t = t1
+	t := t0
+	if findExit || t < tMin {
+		t = t1
 	}
-	if rec.t < tMin || rec.t > tMax {
+	if t < tMin || t > tMax {
 		return false
 	}
+	rec.t = t
 	rec.p = r.at(rec.t)
 
 	outwardNormal := b.normalAt(rec.p)
-	if findExit {
-		outwardNormal = outwardNormal.mul(-1)
-	}
+	rec.p = b.projectSurfacePoint(rec.p, outwardNormal)
 	rec.setFaceNormal(r, outwardNormal)
 	rec.mat = &b.mat
 	return true
 }
 
+// projectSurfacePoint сохраняет точную координату грани для начала вторичного луча.
+func (b *box) projectSurfacePoint(point, normal vec3) vec3 {
+	switch {
+	case normal.x < 0:
+		point.x = b.min.x
+	case normal.x > 0:
+		point.x = b.max.x
+	case normal.y < 0:
+		point.y = b.min.y
+	case normal.y > 0:
+		point.y = b.max.y
+	case normal.z < 0:
+		point.z = b.min.z
+	default:
+		point.z = b.max.z
+	}
+	return point
+}
+
 func updateBoxInterval(t0, t1, minValue, maxValue, origin, direction float64) (float64, float64, bool) {
+	if direction == 0 {
+		return t0, t1, origin >= minValue && origin <= maxValue
+	}
 	invD := 1 / direction
 	tNear := (minValue - origin) * invD
 	tFar := (maxValue - origin) * invD
@@ -216,7 +226,7 @@ func updateBoxInterval(t0, t1, minValue, maxValue, origin, direction float64) (f
 	if tFar < t1 {
 		t1 = tFar
 	}
-	return t0, t1, t1 > t0
+	return t0, t1, t1 >= t0
 }
 
 func (b *box) normalAt(point vec3) vec3 {
