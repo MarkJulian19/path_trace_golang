@@ -39,6 +39,9 @@ func newPreviewPublisher(
 }
 
 func setPreviewCanvasSize(imgCanvas *canvas.Image, preview *scene.RenderSettings, maxWidth, maxHeight *float32) {
+	if preview.Width <= 0 || preview.Height <= 0 {
+		return
+	}
 	aspect := float32(preview.Width) / float32(preview.Height)
 	displayWidth := *maxWidth
 	displayHeight := displayWidth / aspect
@@ -46,5 +49,11 @@ func setPreviewCanvasSize(imgCanvas *canvas.Image, preview *scene.RenderSettings
 		displayHeight = *maxHeight
 		displayWidth = displayHeight * aspect
 	}
-	imgCanvas.SetMinSize(fyne.NewSize(displayWidth, displayHeight))
+	// Это только стартовый размер изображения. Фактический размер задаётся
+	// viewport при каждом изменении layout, иначе панели невозможно сжать.
+	imgCanvas.SetMinSize(fyne.NewSize(
+		min(displayWidth, float32(uiViewportMinWidth)),
+		min(displayHeight, float32(uiViewportMinHeight)),
+	))
+	imgCanvas.Refresh()
 }

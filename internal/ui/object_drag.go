@@ -7,13 +7,7 @@ import (
 	engine "github.com/MarkJulian19/path_trace_golang/internal/usecases/render"
 )
 
-func dragObject(
-	sc *scene.Scene,
-	cfg engine.Config,
-	selected, startX, startY, x2, y2 int,
-	startPosition scene.Vec3,
-	startRender func(bool),
-) {
+func dragObjectDelta(sc *scene.Scene, cfg engine.Config, selected, deltaX, deltaY int, startRender func()) {
 	if selected < 0 || selected >= len(sc.Objects) {
 		return
 	}
@@ -24,14 +18,34 @@ func dragObject(
 	focusDist := cameraFocusDistance(sc)
 	scaleX := viewportWidth * focusDist / float64(cfg.Width)
 	scaleY := viewportHeight * focusDist / float64(cfg.Height)
-	worldDx := float64(x2-startX) * scaleX
-	worldDy := -float64(y2-startY) * scaleY
+	worldDx := float64(deltaX) * scaleX
+	worldDy := -float64(deltaY) * scaleY
 	uX, uY, uZ, vX, vY, vZ := cameraViewportBasis(sc)
 	obj := &sc.Objects[selected]
-	obj.Position.X = startPosition.X + uX*worldDx + vX*worldDy
-	obj.Position.Y = startPosition.Y + uY*worldDx + vY*worldDy
-	obj.Position.Z = startPosition.Z + uZ*worldDx + vZ*worldDy
-	startRender(false)
+	obj.Position.X += uX*worldDx + vX*worldDy
+	obj.Position.Y += uY*worldDx + vY*worldDy
+	obj.Position.Z += uZ*worldDx + vZ*worldDy
+	if startRender != nil {
+		startRender()
+	}
+}
+
+func moveObjectAlongAxis(sc *scene.Scene, selected int, axis gizmoAxis, delta float64) bool {
+	if selected < 0 || selected >= len(sc.Objects) {
+		return false
+	}
+	object := &sc.Objects[selected]
+	switch axis {
+	case gizmoAxisX:
+		object.Position.X += delta
+	case gizmoAxisY:
+		object.Position.Y += delta
+	case gizmoAxisZ:
+		object.Position.Z += delta
+	default:
+		return false
+	}
+	return true
 }
 
 func cameraAspect(sc *scene.Scene, cfg engine.Config) float64 {

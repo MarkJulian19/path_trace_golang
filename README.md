@@ -38,7 +38,7 @@ The MP4 player below works in local Markdown previews that support HTML video. G
 | Geometry | Spheres, axis-aligned boxes, and horizontal planes described in JSON. |
 | Materials | Diffuse surfaces, rough metals, ideal mirrors, glass with refraction and absorption, and emissive objects. |
 | Lighting | Indirect illumination, sphere and box area lights, multiple importance sampling, and volumetric fog. |
-| Scene editor | Object and material controls, camera settings, object picking, and WASDQE camera movement. |
+| Scene editor | Outliner / viewport / inspector layout, object picking, arrow-key transforms, and WASDQE camera movement. |
 | Interactive preview | Live updates, cancellation, and a colored geometry preview labelled **Wireframe** in the UI. |
 | Image output | PNG export, CPU/GPU display denoising, and separate preview/final settings. |
 | Camera animation | Interpolated camera movement and MJPEG/AVI export. |
@@ -141,7 +141,7 @@ GPU rendering requires a driver with **OpenGL 4.3+**. If initialization fails, t
 ### Your first render
 
 1. Start with `example_simple` on CPU and select an object in the scene list.
-2. Adjust its material or camera settings and use **Preview render** to inspect the result. Enable **WASDQE camera control** to move through the scene.
+2. Adjust its material or camera settings and use **Preview render** to inspect the result. Choose **Move** in the top bar, then drag the selected object with the X/Y/Z axis handles or use the arrow keys; **Page Up/Page Down** change height. Enable **WASDQE camera control** to move through the scene.
 3. Set the final resolution and samples, then click **Final render**.
 4. After it finishes, choose an output path and click **Save image (PNG)**. Image saving uses the completed final render. **Save scene** writes edits back to the loaded JSON file.
 

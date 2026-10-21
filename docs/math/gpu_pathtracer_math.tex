@@ -1,1374 +1,673 @@
-\documentclass[14pt, a4paper]{extarticle}
+\documentclass[11pt,a4paper]{article}
 \usepackage[utf8]{inputenc}
-\usepackage{cmap}
 \usepackage[T2A]{fontenc}
-\usepackage[russian]{babel}
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{amsthm}
-\usepackage{geometry}
-\usepackage{breqn}
+\usepackage[russian,english]{babel}
+\usepackage{amsmath,amssymb,booktabs,array,longtable,geometry,xcolor,url}
 \usepackage{tikz}
-\usepackage{tikz-3dplot}
-\usetikzlibrary{arrows,arrows.meta,calc,decorations.pathmorphing,decorations.markings,positioning,3d}
-\allowdisplaybreaks
-\geometry{
-    top=2cm,
-    bottom=2cm,
-    left=3cm,
-    right=2cm
-}
-
+\usetikzlibrary{arrows.meta,calc,positioning,fit,shapes.geometric}
+\geometry{top=1.6cm,bottom=1.6cm,left=1.8cm,right=1.5cm}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\newcommand{\code}[1]{\path{#1}}
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+\title{Математическая постановка и фактическое исполнение GPU path tracer}
+\author{Ревизия исходного кода проекта \code{path_trace_golang}}
+\date{22 октября 2026 г.}
 \begin{document}
-
-\title{Математическое обоснование работы патрейсера на видеокарте}
-\author{}
-\date{}
 \maketitle
+\tableofcontents
+\section{Назначение документа и границы точности}
 
-\section{Введение и архитектура}
+Этот документ описывает не абстрактный «идеальный» path tracer, а текущую цепочку
+исполнения проекта: выбор backend в \code{internal/usecases/render/service.go},
+упаковку сцены в \code{internal/transport/gpu/packing.go}, compute shader из
+\code{shaders.go}, вспомогательные shader-модули и обратную передачу результата.
+Формулы ниже соответствуют реализации на 22.10.2026; приоритет имеют имена функций
+и фактические операции шейдера.
 
-\subsection{Обзор GPU патрейсинга}
+CPU backend реализует ту же семантику трассировки в \code{float64}, но имеет
+собственный worker pool и собственный RNG. Поэтому одинаковый seed делает каждый
+backend воспроизводимым сам с собой, но не обязан давать попиксельно одинаковую
+последовательность случайных чисел.
 
-Path tracing (патрейсинг) --- это метод фотореалистичного рендеринга, основанный на решении уравнения рендеринга методом Монте-Карло. Выполнение патрейсинга на GPU (Graphics Processing Unit) позволяет значительно ускорить вычисления благодаря массивному параллелизму.
+\subsection{Что было исправлено относительно старой версии}
 
-Основная идея заключается в том, что каждый пиксель изображения обрабатывается независимо, что идеально подходит для параллельной архитектуры GPU. Каждый поток GPU вычисляет цвет одного пикселя, трассируя множество случайных лучей и усредняя результаты.
+\begin{longtable}{p{0.35\linewidth}p{0.56\linewidth}}
+\toprule
+Старое утверждение & Фактическое исполнение \\
+\midrule
+Work group $16\times16$ & Обычный path shader: $32\times32$; wireframe: $16\times16$. \\
+RGBA16F & Текстуры и readback: RGBA32F; накопление: три float32 на пиксель. \\
+Стратификация $4\times4$ & В path shader используется независимое jitter-сэмплирование; батч из 4 sample/pixel не является стратификацией. \\
+Schlick Fresnel & Для диэлектрика используется точная неполяризованная формула Френеля; для металла --- Schlick-подобная цветная аппроксимация. \\
+NEE только через $\cos\theta_i\cos\theta_o/(r^2p_A)$ & Сфера сэмплируется по телесному углу, коробка --- по видимой площади с преобразованием PDF. \\
+Firefly clamp $L_{\max}=500$ & В текущем GPU path shader такого clamp нет. \\
+Temporal accumulation через предыдущую текстуру & Текстура действительно ping-pong-ится, но shader не читает \code{prevFrameTex}; математическое накопление выполняет только \code{accumSSBO}. \\
+\bottomrule
+\end{longtable}
 
-\subsection{Архитектура OpenGL Compute Shaders}
+\section{Общая постановка задачи}
 
-В данной реализации используется OpenGL 4.3+ с поддержкой compute shaders. Compute shader --- это специальный тип шейдера, который позволяет выполнять произвольные вычисления на GPU без привязки к графическому конвейеру.
-
-Архитектура compute shader основана на концепции work groups (рабочих групп). Каждая рабочая группа содержит фиксированное количество потоков (threads), которые выполняются параллельно. В нашем случае используется размер рабочей группы $16 \times 16 = 256$ потоков.
-
-\subsection{Структура данных на GPU}
-
-Данные передаются на GPU через специальные буферы:
-\begin{itemize}
-    \item \textbf{Uniform Buffer Objects (UBO)} --- для постоянных данных (камера, небо, туман)
-    \item \textbf{Shader Storage Buffer Objects (SSBO)} --- для массивов данных (материалы, объекты, накопительный буфер)
-    \item \textbf{Image2D} --- для выходного изображения (текстура RGBA16F)
-\end{itemize}
-
-\section{Форматы данных и передача на GPU}
-
-\subsection{Uniform Buffer Objects (UBO) --- формат std140}
-
-Uniform Buffer Objects используют выравнивание std140, которое гарантирует определенную структуру размещения данных в памяти. Это необходимо для корректного доступа к данным из шейдера.
-
-\subsubsection{Блок камеры}
-
-Камера передается как структура из 16 float32 (4 vec4), что составляет 64 байта:
-
-\begin{align}
-\text{CameraBlock} &= \begin{bmatrix}
-\text{camPos} & \text{(vec4, 16 байт)} \\
-\text{camTarget} & \text{(vec4, 16 байт)} \\
-\text{camUp} & \text{(vec4, 16 байт)} \\
-\text{camFov, camAperture, camFocusDist, camAspect} & \text{(4 float, 16 байт)}
-\end{bmatrix}
-\end{align}
-
-Математически позиция камеры $\mathbf{c}_{\text{pos}}$, цель $\mathbf{c}_{\text{target}}$ и вектор вверх $\mathbf{c}_{\text{up}}$ определяют систему координат камеры.
-
-\subsubsection{Блок неба}
-
-Небо передается как структура с выравниванием std140:
-
-\begin{align}
-\text{SkyBlock} &= \begin{bmatrix}
-\text{skyType} & \text{(float, 4 байта + 12 байт padding)} \\
-\text{skyColor} & \text{(vec4, 16 байт)} \\
-\text{skyHorizon} & \text{(vec4, 16 байт)} \\
-\text{skyZenith} & \text{(vec4, 16 байт)}
-\end{bmatrix}
-\end{align}
-
-Общий размер: 64 байта (выравнивание std140 требует, чтобы каждый элемент занимал кратные 16 байт).
-
-\subsubsection{Блок тумана}
-
-Туман содержит физические параметры объемного рассеяния:
-
-\begin{align}
-\text{FogBlock} &= \begin{bmatrix}
-\text{fogDensity, fogScatter, fogAffectSky, fogGpuVolumetric} & \text{(4 float)} \\
-\text{fogColor} & \text{(vec4)} \\
-\text{fogSigmaS, fogSigmaA, fogG} & \text{(3 float + padding)} \\
-\text{fogHeteroStrength, fogNoiseScale, fogNoiseOctaves} & \text{(3 float + padding)}
-\end{bmatrix}
-\end{align}
-
-Ключевые физические параметры:
-\begin{itemize}
-    \item $\sigma_s$ --- коэффициент рассеяния (scattering coefficient)
-    \item $\sigma_a$ --- коэффициент поглощения (absorption coefficient)
-    \item $\sigma_t = \sigma_s + \sigma_a$ --- коэффициент экстинкции (extinction coefficient)
-    \item $g$ --- параметр анизотропии фазовой функции Хеньи-Грина
-\end{itemize}
-
-\subsection{Shader Storage Buffer Objects (SSBO) --- формат std430}
-
-SSBO используют более компактное выравнивание std430, которое не требует padding между элементами массивов.
-
-\subsubsection{Буфер материалов}
-
-Каждый материал занимает 20 float32 (80 байт):
-
-\begin{align}
-\text{matData}[i] &= \begin{bmatrix}
-\text{type} & \text{(float, индекс 0)} \\
-\text{rough} & \text{(float, индекс 1)} \\
-\text{ior} & \text{(float, индекс 2)} \\
-\text{smoothness} & \text{(float, индекс 3)} \\
-\text{albedo.r, albedo.g, albedo.b} & \text{(float, индексы 4-6)} \\
-\text{reflectivity} & \text{(float, индекс 7)} \\
-\text{emit.r, emit.g, emit.b} & \text{(float, индексы 8-10)} \\
-\text{pad0} & \text{(float, индекс 11)} \\
-\text{absorption.r, absorption.g, absorption.b} & \text{(float, индексы 12-14)} \\
-\text{absorptionScale} & \text{(float, индекс 15)} \\
-\text{tint.r, tint.g, tint.b} & \text{(float, индексы 16-18)} \\
-\text{pad2} & \text{(float, индекс 19)}
-\end{bmatrix}
-\end{align}
-
-Размер буфера материалов:
+Пусть сцена задаётся множеством объектов $\mathcal O$, материалов $\mathcal M$,
+источников света $\mathcal L$, камерой и средой. Для изображения ширины $W$ и
+высоты $H$ требуется оценить цвет каждого пикселя $(x,y)$:
 \[
-\text{size}_{\text{materials}} = N_{\text{materials}} \times 20 \times 4 \text{ байт} = 80N_{\text{materials}} \text{ байт}
+ \widehat{C}(x,y)=\frac{1}{S}\sum_{k=0}^{S-1}L(x,y,k),
+ \qquad S=\max(\texttt{SamplesPerPx},1).
 \]
+Здесь $L$ --- HDR-линейный RGB-радианс одного пути. Глубина пути ограничена
+\code{MaxDepth}=D, а расстояние пересечения --- \code{MaxRayDist}; если оно не
+положительно, GPU использует $R_{\max}=1000$.
 
-где $N_{\text{materials}}$ --- количество материалов в сцене.
-
-\subsubsection{Буфер объектов}
-
-Каждый объект занимает 12 float32 (48 байт):
-
-\begin{align}
-\text{objData}[i] &= \begin{bmatrix}
-\text{type} & \text{(float, индекс 0)} \\
-\text{materialIndex} & \text{(float, индекс 1)} \\
-\text{pad0, pad1} & \text{(float, индексы 2-3)} \\
-\text{pos.x, pos.y, pos.z} & \text{(float, индексы 4-6)} \\
-\text{pad2} & \text{(float, индекс 7)} \\
-\text{size.x, size.y, size.z} & \text{(float, индексы 8-10)} \\
-\text{pad3} & \text{(float, индекс 11)}
-\end{bmatrix}
-\end{align}
-
-Размер буфера объектов:
+Поверхностная часть оценивает уравнение рендеринга:
 \[
-\text{size}_{\text{objects}} = N_{\text{objects}} \times 12 \times 4 \text{ байт} = 48N_{\text{objects}} \text{ байт}
+ L_o(\vect{x},\omega_o)=L_e(\vect{x},\omega_o)+
+ \int_{\Omega^+} f(\vect{x},\omega_i,\omega_o)L_i(\vect{x},\omega_i)
+ (\vect{n}\cdot\omega_i)\,d\omega_i.
 \]
+В объёме добавляется затухание и single-scattering через коэффициенты
+$\sigma_s$, $\sigma_a$, $\sigma_t=\sigma_s+\sigma_a$.
 
-\subsubsection{Буфер индексов источников света}
+\section{Фактический pipeline: от вызова Go до PNG}
 
-Список индексов эмиссивных объектов хранится как массив int32:
-
-\[
-\text{lightIndices} = [i_1, i_2, \ldots, i_{N_{\text{lights}}}]
-\]
-
-где $i_j$ --- индекс объекта-источника света в массиве объектов.
-
-Размер:
-\[
-\text{size}_{\text{lights}} = N_{\text{lights}} \times 4 \text{ байт}
-\]
-
-\subsubsection{Накопительный буфер}
-
-Накопительный буфер хранит сумму всех сэмплов для каждого пикселя:
-
-\[
-\text{accumData}[i] = [R_i, G_i, B_i]
-\]
-
-где $i = y \times W + x$ --- линейный индекс пикселя с координатами $(x, y)$.
-
-Размер накопительного буфера:
-\[
-\text{size}_{\text{accum}} = W \times H \times 3 \times 4 \text{ байт} = 12WH \text{ байт}
-\]
-
-где $W$ --- ширина изображения, $H$ --- высота изображения.
-
-\section{Распараллеливание вычислений}
-
-\subsection{Work Group размер}
-
-Compute shader использует фиксированный размер рабочей группы (work group):
-
-\[
-\text{local\_size\_x} = 16, \quad \text{local\_size\_y} = 16
-\]
-
-Это означает, что каждая рабочая группа содержит $16 \times 16 = 256$ потоков, которые выполняются параллельно на одном вычислительном блоке GPU.
-
-\subsection{Диспетчеризация compute shader}
-
-Количество рабочих групп вычисляется по формулам:
-
-\begin{align}
-\text{groupsX} &= \left\lceil \frac{W}{16} \right\rceil = \left\lfloor \frac{W + 15}{16} \right\rfloor \\
-\text{groupsY} &= \left\lceil \frac{H}{16} \right\rceil = \left\lfloor \frac{H + 15}{16} \right\rfloor
-\end{align}
-
-где $\lceil \cdot \rceil$ --- функция округления вверх (ceiling), $\lfloor \cdot \rfloor$ --- округление вниз (floor).
-
-Общее количество рабочих групп:
-\[
-N_{\text{groups}} = \text{groupsX} \times \text{groupsY}
-\]
-
-Общее количество потоков (может превышать количество пикселей):
-\[
-N_{\text{threads}} = N_{\text{groups}} \times 256
-\]
-
-\subsection{Глобальный индекс пикселя}
-
-Каждый поток имеет уникальный глобальный индекс, вычисляемый как:
-
-\begin{align}
-\text{pix}_x &= \text{gl\_GlobalInvocationID.x} \\
-\text{pix}_y &= \text{gl\_GlobalInvocationID.y}
-\end{align}
-
-где $\text{gl\_GlobalInvocationID}$ --- встроенная переменная OpenGL, содержащая глобальные координаты потока.
-
-Линейный индекс пикселя:
-\[
-\text{pixIdx} = \text{pix}_y \times W + \text{pix}_x
-\]
-
-\subsection{Инициализация генератора случайных чисел}
-
-Для обеспечения детерминированности и воспроизводимости результатов, каждый поток инициализирует свой генератор случайных чисел на основе координат пикселя и seed кадра:
-
-\[
-\text{state}_0 = \text{hash}(\text{pix}_x \times 1973 \oplus \text{pix}_y \times 9277 \oplus \text{frameSeed})
-\]
-
-где $\oplus$ --- операция XOR, $\text{hash}$ --- хэш-функция для генерации псевдослучайных чисел.
-
-Хэш-функция реализуется как последовательность битовых операций:
-
-\begin{align}
-x_1 &= x \oplus (x \gg 17) \\
-x_2 &= x_1 \times 0\text{xED5AD4BB} \\
-x_3 &= x_2 \oplus (x_2 \gg 11) \\
-x_4 &= x_3 \times 0\text{xAC4C1B51} \\
-x_5 &= x_4 \oplus (x_4 \gg 15) \\
-\text{hash}(x) &= (x_5 \times 0\text{x31848BAB}) \oplus (x_5 \gg 14)
-\end{align}
-
-где $\gg$ --- побитовый сдвиг вправо.
-
-\section{Генерация первичных лучей}
-
-\subsection{Построение системы координат камеры}
-
-Система координат камеры определяется тремя ортогональными векторами:
-
-\begin{align}
-\mathbf{w} &= \frac{\mathbf{c}_{\text{pos}} - \mathbf{c}_{\text{target}}}{\|\mathbf{c}_{\text{pos}} - \mathbf{c}_{\text{target}}\|} \\
-\mathbf{u} &= \frac{\mathbf{c}_{\text{up}} \times \mathbf{w}}{\|\mathbf{c}_{\text{up}} \times \mathbf{w}\|} \\
-\mathbf{v} &= \mathbf{w} \times \mathbf{u}
-\end{align}
-
-где $\mathbf{w}$ направлен от цели к позиции камеры (обратное направление взгляда), $\mathbf{u}$ --- вектор вправо, $\mathbf{v}$ --- вектор вверх.
-
-\begin{figure}[h]
+\begin{figure}[ht]
 \centering
-\begin{tikzpicture}[scale=1.2]
-    % Камера
-    \coordinate (cam) at (0,0);
-    \coordinate (target) at (4,0);
-    
-    % Векторы системы координат
-    \draw[->,thick,blue] (cam) -- ($(cam) + (-1.5,0)$) node[above] {$\mathbf{w}$};
-    \draw[->,thick,red] (cam) -- ($(cam) + (0,1.5)$) node[right] {$\mathbf{v}$};
-    \draw[->,thick,green!60!black] (cam) -- ($(cam) + (0.8,0.8)$) node[above left] {$\mathbf{u}$};
-    
-    % Камера (точка)
-    \fill[black] (cam) circle (2pt) node[below left] {$\mathbf{c}_{\text{pos}}$};
-    
-    % Цель
-    \fill[black] (target) circle (2pt) node[below] {$\mathbf{c}_{\text{target}}$};
-    \draw[dashed] (cam) -- (target);
-    
-    % Viewport
-    \draw[thick,orange] ($(target) + (-1,1)$) -- ($(target) + (1,1)$) -- ($(target) + (1,-1)$) -- ($(target) + (-1,-1)$) -- cycle;
-    \node[orange] at ($(target) + (0,1.3)$) {viewport};
-    
-    % Луч
-    \draw[->,thick,purple] (cam) -- ($(target) + (0.3,0.5)$) node[midway,above] {луч};
-    
-    % Угол FOV
-    \draw[dashed] (cam) -- ($(target) + (1,1)$);
-    \draw[dashed] (cam) -- ($(target) + (1,-1)$);
-    \draw[<->] ($(cam) + (0.5,0)$) arc (0:25:0.5) node[midway,right] {$\theta/2$};
+\begin{tikzpicture}[node distance=7mm and 7mm,>=Latex,
+  block/.style={draw,rounded corners,fill=blue!7,align=center,minimum width=31mm,minimum height=9mm},
+  data/.style={draw,rounded corners,fill=orange!12,align=center,minimum width=31mm,minimum height=9mm},
+  arrow/.style={->,thick}]
+\node[block] (service) {Service\\BackendGPU};
+\node[block,right=of service] (worker) {GL worker\\locked OS thread};
+\node[data,right=of worker] (scene) {Scene packing\\UBO/SSBO};
+\node[block,below=of scene] (dispatch) {tiles +\\DispatchCompute};
+\node[block,left=of dispatch] (shader) {compute shader\\one pixel/thread};
+\node[data,left=of shader] (accum) {accumSSBO\\RGB float32};
+\node[block,below=of accum] (readback) {PBO/readback\\HDR float};
+\node[data,right=of readback] (post) {ACES + $\sqrt{\cdot}$\\dither/denoise};
+\node[data,right=of post] (png) {image.RGBA\\PNG/UI};
+\draw[arrow] (service)--(worker);
+\draw[arrow] (worker)--(scene);
+\draw[arrow] (scene)--(dispatch);
+\draw[arrow] (dispatch)--(shader);
+\draw[arrow] (shader)--(accum);
+\draw[arrow] (accum)--(readback);
+\draw[arrow] (readback)--(post);
+\draw[arrow] (post)--(png);
 \end{tikzpicture}
-\caption{Система координат камеры и генерация луча}
+\caption{Реальная последовательность GPU backend.}
 \end{figure}
 
-\subsection{Вычисление размеров viewport}
+\begin{enumerate}
+\item \code{Service.IntoWithCancel} выбирает GPU только при \code{BackendGPU}; при
+  ошибке инициализации/рендера выполняется CPU fallback.
+\item \code{RenderWithCancel} создаёт скрытое GLFW-окно, запускает один GL worker и
+  привязывает контекст к его OS thread. Нужен OpenGL 4.3 и compute shader.
+\item \code{prepareGPUFrame} упаковывает сцену, изменяет размеры ресурсов, очищает
+  texture и накопительный SSBO, загружает uniform/SSBO и выбирает normal/wireframe.
+\item Один проход обрабатывает не весь кадр одним вызовом: изображение режется на
+  адаптивные плитки. Каждая плитка ждёт fence, чтобы не переполнять очередь GPU и
+  разрешать UI обрабатывать отмену.
+\item После dispatch выполняется barrier, затем при live preview делается
+  периодический readback через один из двух PBO. После последнего pass гарантируется
+  финальный readback.
+\item HDR RGB преобразуется в 8-bit RGBA, затем при подходящих настройках идут
+  CPU bilateral denoise и необязательный box smooth.
+\end{enumerate}
 
-Размеры viewport вычисляются на основе поля зрения (FOV) и соотношения сторон:
+\section{Данные и раскладка памяти}
 
-\begin{align}
-\theta &= \frac{\text{FOV} \times \pi}{180} \quad \text{(преобразование из градусов в радианы)} \\
-h &= \tan\left(\frac{\theta}{2}\right) \\
-\text{viewportHeight} &= 2h \\
-\text{viewportWidth} &= \text{aspect} \times \text{viewportHeight}
-\end{align}
+\subsection{Камера, небо и туман}
 
-где $\text{aspect} = W/H$ --- соотношение сторон изображения.
-
-\subsection{Построение луча без глубины резкости}
-
-Для простой камеры (без DOF) луч строится следующим образом:
-
-\begin{align}
-u &= \frac{\text{pix}_x + \xi_x}{W - 1} \quad \text{(нормализованные координаты [0, 1])} \\
-v &= \frac{H - 1 - \text{pix}_y + \xi_y}{H - 1}
-\end{align}
-
-где $\xi_x, \xi_y \in [0, 1]$ --- случайные смещения для сэмплирования внутри пикселя.
-
-Направление луча:
-\begin{align}
-\mathbf{horizontal} &= \text{viewportWidth} \times \text{focusDist} \times \mathbf{u} \\
-\mathbf{vertical} &= \text{viewportHeight} \times \text{focusDist} \times \mathbf{v} \\
-\mathbf{lowerLeftCorner} &= \mathbf{c}_{\text{pos}} - \frac{1}{2}\mathbf{horizontal} - \frac{1}{2}\mathbf{vertical} - \text{focusDist} \times \mathbf{w} \\
-\mathbf{dir} &= \mathbf{lowerLeftCorner} + u \times \mathbf{horizontal} + v \times \mathbf{vertical} - \mathbf{c}_{\text{pos}} \\
-\mathbf{r}_{\text{dir}} &= \frac{\mathbf{dir}}{\|\mathbf{dir}\|}
-\end{align}
-
-Начало луча:
+Все три UBO передаются как массивы по 16 float32, то есть по 64 байта:
 \[
-\mathbf{r}_{\text{orig}} = \mathbf{c}_{\text{pos}}
+ C=[p_x,p_y,p_z,0,\ t_x,t_y,t_z,0,\ u_x,u_y,u_z,0,\mathrm{FOV},a,f,A],
 \]
-
-\subsection{Генерация луча с учетом глубины резкости (DOF)}
-
-Для камеры с диафрагмой (aperture $> 0$) луч генерируется с учетом глубины резкости:
-
-\begin{align}
-\text{lensRadius} &= \frac{\text{aperture}}{2} \\
-\mathbf{rd} &= \text{lensRadius} \times \text{randomInUnitSphere}() \\
-\mathbf{offset} &= \mathbf{u} \times \mathbf{rd}_x + \mathbf{v} \times \mathbf{rd}_y \\
-\mathbf{r}_{\text{orig}} &= \mathbf{c}_{\text{pos}} + \mathbf{offset} \\
-\mathbf{dir} &= \mathbf{lowerLeftCorner} + u \times \mathbf{horizontal} + v \times \mathbf{vertical} - \mathbf{r}_{\text{orig}} \\
-\mathbf{r}_{\text{dir}} &= \frac{\mathbf{dir}}{\|\mathbf{dir}\|}
-\end{align}
-
-\subsection{Stratified Sampling}
-
-Для уменьшения дисперсии (variance) используется стратифицированное сэмплирование. Пиксель разбивается на $N \times N$ страт (обычно $N = 4$, что дает 16 страт):
-
-\begin{align}
-\text{strataSize} &= 4 \\
-\text{totalStrata} &= \text{strataSize}^2 = 16 \\
-\text{samplesPerStratum} &= \left\lfloor \frac{N_{\text{samples}}}{\text{totalStrata}} \right\rfloor \\
-\text{extraSamples} &= N_{\text{samples}} - \text{samplesPerStratum} \times \text{totalStrata}
-\end{align}
-
-Для каждой страты $(s_x, s_y)$ генерируются случайные смещения:
-
-\begin{align}
-\xi_x, \xi_y &\sim \mathcal{U}(0, 1) \quad \text{(равномерное распределение)} \\
-\text{stratumU} &= \frac{s_x + \xi_x}{\text{strataSize}} \\
-\text{stratumV} &= \frac{s_y + \xi_y}{\text{strataSize}} \\
-u &= \frac{\text{pix}_x + \text{stratumU}}{W - 1} \\
-v &= \frac{H - 1 - \text{pix}_y + \text{stratumV}}{H - 1}
-\end{align}
-
-\section{Пересечение лучей с объектами}
-
-\subsection{Пересечение со сферой}
-
-Луч задается параметрическим уравнением:
-\[
-\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}, \quad t > 0
-\]
-
-где $\mathbf{o}$ --- начало луча, $\mathbf{d}$ --- направление луча (нормализовано).
-
-Сфера задается центром $\mathbf{c}$ и радиусом $r$. Подставляя уравнение луча в уравнение сферы:
+где $a$ --- aperture, $f$ --- focus distance, $A$ --- aspect ratio.
 
 \[
-\|\mathbf{r}(t) - \mathbf{c}\|^2 = r^2
+ Sky=[s,0,0,0,\ c_r,c_g,c_b,1,\ h_r,h_g,h_b,1,\ z_r,z_g,z_b,1].
 \]
-
-Раскрывая скобки:
-
-\begin{align}
-\|\mathbf{o} + t\mathbf{d} - \mathbf{c}\|^2 &= r^2 \\
-\|\mathbf{o} - \mathbf{c} + t\mathbf{d}\|^2 &= r^2 \\
-(\mathbf{o} - \mathbf{c} + t\mathbf{d}) \cdot (\mathbf{o} - \mathbf{c} + t\mathbf{d}) &= r^2
-\end{align}
-
-Раскрывая скалярное произведение:
-
-\begin{align}
-\|\mathbf{o} - \mathbf{c}\|^2 + 2t(\mathbf{o} - \mathbf{c}) \cdot \mathbf{d} + t^2\|\mathbf{d}\|^2 &= r^2
-\end{align}
-
-Поскольку $\mathbf{d}$ нормализован, $\|\mathbf{d}\|^2 = 1$. Получаем квадратное уравнение:
-
-\begin{align}
-at^2 + bt + c &= 0
-\end{align}
-
-где:
-\begin{align}
-a &= \|\mathbf{d}\|^2 = 1 \\
-b &= 2(\mathbf{o} - \mathbf{c}) \cdot \mathbf{d} \\
-c &= \|\mathbf{o} - \mathbf{c}\|^2 - r^2
-\end{align}
-
-Дискриминант:
+Значение $s=0$ означает deprecated background, $s=1$ --- solid, $s=2$ ---
+gradient. Для fog:
 \[
-\Delta = b^2 - 4ac = b^2 - 4c
+ F=[d,q,a_s,v,\ c_r,c_g,c_b,1,\sigma_s,\sigma_a,g,k,n,o,0,0],
 \]
+где $d$ --- legacy density, $q$ --- scatter, $a_s$ --- affect sky, $v$ ---
+GPU volumetric, $k$ --- heterogeneity strength, $n$ --- noise scale, $o$ ---
+number of octaves.
 
-Если $\Delta < 0$, пересечений нет. Иначе:
+\subsection{Материалы и объекты}
 
+Для материала $i$ используется ровно 20 float32 (80 байт):
 \[
-t = \frac{-b \pm \sqrt{\Delta}}{2a} = \frac{-b \pm \sqrt{\Delta}}{2}
+ [type,rough,ior,smoothness,\ albedo_{rgb},reflectivity,\ emit_{rgb},pad,
+ absorption_{rgb},absorptionScale,tint_{rgb},pad].
 \]
+При упаковке emission уже умножается на $\max(0,\texttt{Power})$. Для dielectric
+при нулевых legacy-полях задаются IOR $1.5$, tint $(1,1,1)$ и absorption scale
+$0.01$; для metal/mirror при нулевых полях smoothness и reflectivity становятся
+соответственно $1-rough$ и $1$.
 
-Выбирается минимальное положительное $t$ в диапазоне $[t_{\min}, t_{\max}]$.
-
-Нормаль в точке пересечения:
+Для объекта используется 12 float32 (48 байт):
 \[
-\mathbf{n} = \frac{\mathbf{r}(t) - \mathbf{c}}{r}
+ [type,materialIndex,0,0,\ position_{xyz},0,\ size_{xyz},0].
 \]
+Sphere использует $size_x$ как радиус, plane имеет нормаль $(0,1,0)$, box задаётся
+\[
+ \vect b_{min}=\vect p-\frac12\vect s,\qquad
+ \vect b_{max}=\vect p+\frac12\vect s.
+\]
+Индекс источника хранится отдельно как int32 в \code{lightIndices}; туда попадают
+только emissive-материалы с хотя бы одной положительной компонентой emission.
 
-\begin{figure}[h]
+Накопитель имеет $3WH$ float32:
+\[
+ \mathrm{base}=3(yW+x),\qquad
+ A_{\mathrm{base}:\mathrm{base}+3}\leftarrow A+L.
+\]
+RGBA32F texture и PBO имеют четыре float32 на пиксель, но четвёртая компонента
+служит только альфой при записи $(R,G,B,1)$; в математическое накопление она не
+входит.
+
+\section{Параллелизм и индексы}
+
+Для обычного shader объявлено $l_x=l_y=32$, поэтому одна work group содержит
+$1024$ invocations. Для wireframe используется $16\times16$. Для участка плитки
+размером $w\times h$:
+\[
+ G_x=\left\lceil\frac{w}{l_x}\right\rceil=\frac{w+l_x-1}{l_x},\qquad
+ G_y=\left\lceil\frac{h}{l_y}\right\rceil.
+\]
+Глобальная координата потока с offset $(o_x,o_y)$:
+\[
+ x=\texttt{gl\_GlobalInvocationID.x}+o_x,\qquad
+ y=\texttt{gl\_GlobalInvocationID.y}+o_y.
+\]
+Потоки за границей кадра сразу выходят по условию $x\ge W\lor y\ge H$.
+
+Обычный path pass обрабатывает $B$ сэмплов на пиксель, где по умолчанию $B=4$ и
+допустимы $1\ldots16$. Число pass:
+\[
+ P=\left\lceil\frac{S}{B}\right\rceil,
+ \qquad B_i=\min(B,S-iB),
+ \qquad N_i=iB+B_i.
+\]
+В shader каждый из $B_i$ sample использует индекс $k=N_i-B_i+j$. Начальный RNG:
+\[
+ q=yW+x,\qquad state_0=\operatorname{hash}(q\mathbin{\mathsf{xor}}
+ \operatorname{hash}(frameSeed+k)).
+\]
+Затем каждый вызов \texttt{rng} делает
+\[
+ state\leftarrow hash(state+\texttt{0x9e3779b9}),\qquad
+ \xi=\frac{state\mathbin{\gg}8}{2^{24}}\in[0,1).
+\]
+Здесь hash --- последовательность XOR, сдвигов и умножений на
+\texttt{0xed5ad4bb}, \texttt{0xac4c1b51}, \texttt{0x31848bab}.
+
+\section{Первичный луч камеры}
+
+Пусть $\vect c$ --- position, $\vect t$ --- target, $\vect u_0$ --- up:
+\[
+ \vect w=\frac{\vect c-\vect t}{\|\vect c-\vect t\|},\qquad
+ \vect u=\frac{\vect u_0\times\vect w}{\|\vect u_0\times\vect w\|},\qquad
+ \vect v=\vect w\times\vect u.
+\]
+Для $\theta=\mathrm{FOV}\,\pi/180$:
+\[
+ h=\tan(\theta/2),\quad V_h=2h,\quad V_w=A V_h,
+ \quad H=fV_h\vect v,\quad W_c=fV_w\vect u,
+\]
+\[
+ \vect q=\vect c-\tfrac12W_c-\tfrac12H-f\vect w.
+\]
+Jitter выбирается без стратификации:
+\[
+ \xi_x,\xi_y\sim U[0,1),\qquad
+ U=\frac{x+\xi_x}{W},\qquad
+ V=\frac{H-1-y+\xi_y}{H}.
+\]
+Направление pinhole-луча:
+\[
+ \vect d=\operatorname{normalize}(\vect q+U W_c+V H-\vect c).
+\]
+При aperture $>0$ выбирается равномерная точка на диске объектива:
+\[
+ r_l=\frac{aperture}{2}\sqrt{\xi_1},\quad
+ \phi=2\pi\xi_2,\quad
+ \vect o=\vect c+\vect u(r_l\cos\phi)+\vect v(r_l\sin\phi),
+\]
+а направление строится из $\vect q+UW_c+VH-\vect o$. Это даёт DOF с фокусом
+на плоскости, заданной $f$.
+
+\begin{figure}[ht]
 \centering
-\begin{tikzpicture}[scale=1.5]
-    % Сфера
-    \draw[thick,blue] (0,0) circle (1.5cm);
-    \coordinate (center) at (0,0);
-    \fill[black] (center) circle (1pt) node[below left] {$\mathbf{c}$};
-    
-    % Луч
-    \coordinate (rayStart) at (-2.5,-1);
-    \coordinate (hitPoint) at (0.8,1.2);
-    \draw[->,thick,red] (rayStart) -- (hitPoint);
-    \draw[->,thick,red,dashed] (hitPoint) -- ($(hitPoint) + 0.8*(hitPoint) - 0.8*(rayStart)$);
-    
-    % Точки
-    \fill[black] (rayStart) circle (1.5pt) node[below left] {$\mathbf{o}$};
-    \fill[red] (hitPoint) circle (1.5pt) node[above right] {$\mathbf{r}(t)$};
-    
-    % Нормаль
-    \draw[->,thick,green!60!black] (hitPoint) -- ($(hitPoint) + 0.6*(hitPoint) - 0.6*(center)$) node[midway,right] {$\mathbf{n}$};
-    
-    % Радиус
-    \draw[dashed] (center) -- (hitPoint);
-    \node at ($(center) + 0.5*(hitPoint) + (0.2,0.1)$) {$r$};
-    
-    % Вектор направления
-    \draw[->,thick,purple] ($(rayStart) + 0.3*(hitPoint) - 0.3*(rayStart)$) -- ($(rayStart) + 0.5*(hitPoint) - 0.5*(rayStart)$) node[midway,above] {$\mathbf{d}$};
+\begin{tikzpicture}[>=Latex,scale=1.05]
+  \coordinate (c) at (0,0); \coordinate (p) at (5,0);
+  \draw[thick,blue] (c) -- (p);
+  \draw[thick,orange] (5,-1.5)--(5,1.5);
+  \draw[->,very thick,purple] (c)--(4.1,0.7) node[midway,above] {$\vect o+t\vect d$};
+  \draw[->,thick,red] (c)--(-1.1,0) node[left] {$\vect w$};
+  \draw[->,thick,green!60!black] (c)--(0,1.1) node[right] {$\vect v$};
+  \draw[->,thick,cyan!60!black] (c)--(0.8,0.7) node[above] {$\vect u$};
+  \fill (c) circle (2pt) node[below left] {$\vect c$};
+  \fill (p) circle (2pt) node[below right] {target/focus plane};
+  \draw[dashed] (c)--(5,1.5); \draw[dashed] (c)--(5,-1.5);
 \end{tikzpicture}
-\caption{Пересечение луча со сферой}
+\caption{Построение луча из камеры; координата $y$ переворачивается перед вычислением $V$.}
 \end{figure}
 
-\subsection{Пересечение с плоскостью}
+\section{Пересечения и геометрическая нормаль}
 
-Плоскость задается точкой $\mathbf{p}$ и нормалью $\mathbf{n}$ (нормализована). Уравнение плоскости:
+Все пересечения ищутся в интервале $[t_{min},t_{max}]$; для продолжения пути
+\code{hitWorld} перебирает объекты в порядке массива и оставляет ближайшее
+пересечение, каждый раз уменьшая $t_{max}$.
 
+\subsection{Сфера}
+
+Луч $\vect r(t)=\vect o+t\vect d$, сфера $(\vect c,r)$:
 \[
-(\mathbf{x} - \mathbf{p}) \cdot \mathbf{n} = 0
+ a=\vect d\cdot\vect d,\quad
+ b_h=(\vect o-\vect c)\cdot\vect d,\quad
+ c=(\vect o-\vect c)^2-r^2,
+ \quad \Delta=b_h^2-ac.
+\]
+При $\Delta\ge0$ проверяются корни
+\[
+ t=\frac{-b_h\pm\sqrt{\Delta}}{a}.
+\]
+В текущем normal shader используется эквивалентная midpoint-форма:
+\[
+ t_m=-\frac{(\vect o-\vect c)\cdot\vect d}{a},\qquad
+ \vect q=(\vect o-\vect c)+t_m\vect d,\qquad
+ h=\sqrt{\frac{r^2-\vect q^2}{a}},\quad t=t_m-h.
+\]
+Если первый корень вне интервала, берётся $t_m+h$. Внешняя нормаль
+$\vect n_o=\operatorname{normalize}(\vect r(t)-\vect c)$.
+
+\subsection{Плоскость}
+
+Для точки $\vect p$ и нормали $\vect n=(0,1,0)$:
+\[
+ t=\frac{(\vect p-\vect o)\cdot\vect n}{\vect d\cdot\vect n}.
+\]
+При нулевом знаменателе или $t\notin[t_{min},t_{max}]$ пересечения нет.
+
+\subsection{AABB}
+
+Для каждой оси $i$:
+\[
+ t_0^i=(b_{min}^i-o^i)/d^i,\quad
+ t_1^i=(b_{max}^i-o^i)/d^i,
+ \quad t_{near}=\max_i\min(t_0^i,t_1^i),
+ \quad t_{far}=\min_i\max(t_0^i,t_1^i).
+\]
+Пересечение существует при $t_{far}\ge t_{near}$; если вход уже позади
+$t_{min}$, берётся $t_{far}$. Для продолжения диэлектрического пути есть отдельный
+режим \code{findExit}, который принудительно берёт выходную грань. Нормаль грани
+получается из оси, обновившей $t_{near}$ или $t_{far}$, а не из сглаживания.
+
+После пересечения применяется \code{setFaceNormal}:
+\[
+ frontFace=[\vect d\cdot\vect n_o<0],\qquad
+ \vect n=frontFace?\vect n_o:-\vect n_o.
+\]
+Вторичный луч сдвигается от поверхности через ULP-based \code{offsetRay}; это
+подавляет self-intersection и не является физическим расстоянием в сцене.
+
++
+\section{Поверхности и throughput}
+
+Для пути хранятся $\vect\beta$ (throughput), $\vect L$ (накопленная radiance),
+текущая среда, $pdf_{prev}$, предыдущая точка и $\eta$-масштаб. Начальные значения:
+\[
+ \vect\beta=(1,1,1),\qquad \vect L=(0,0,0),\qquad etaScale=1.
 \]
 
-Подставляя параметрическое уравнение луча:
-
-\begin{align}
-(\mathbf{o} + t\mathbf{d} - \mathbf{p}) \cdot \mathbf{n} &= 0 \\
-(\mathbf{o} - \mathbf{p}) \cdot \mathbf{n} + t(\mathbf{d} \cdot \mathbf{n}) &= 0
-\end{align}
-
-Отсюда:
+\subsection{Lambert}
 
 \[
-t = \frac{(\mathbf{p} - \mathbf{o}) \cdot \mathbf{n}}{\mathbf{d} \cdot \mathbf{n}}
+ f_r=\frac{\vect\rho}{\pi},\qquad
+ p(\omega)=\frac{\vect n\cdot\omega}{\pi},\qquad
+ \vect\beta\leftarrow\vect\beta\odot\vect\rho.
 \]
-
-Если $|\mathbf{d} \cdot \mathbf{n}| < \epsilon$ (луч параллелен плоскости), пересечения нет. Иначе проверяется, что $t \in [t_{\min}, t_{\max}]$.
-
-Точка пересечения:
+Направление генерируется cosine-weighted sampling:
 \[
-\mathbf{hit} = \mathbf{o} + t\mathbf{d}
+ \phi=2\pi\xi_1,\quad \cos\theta=\sqrt{\xi_2},\quad
+ \sin\theta=\sqrt{1-\xi_2},
+\]
+после чего локальный вектор преобразуется базисом $(\vect u,\vect v,\vect n)$.
+
+\subsection{Metal: GGX visible-normal sampling}
+
+Для metal shader использует $rough=1-smoothness$, $\alpha=rough^2$:
+\[
+ D(h)=\frac{\alpha^2}{\pi((1-n_h^2)+n_h^2\alpha^2)^2},
+\]
+\[
+ G_1(c,\alpha)=\frac{2c}{c+\sqrt{\alpha^2+(1-\alpha^2)c^2}},
+ \quad G=G_1(n_v,\alpha)G_1(n_l,\alpha),
+\]
+\[
+ F=F_0+(1-F_0)(1-v_h)^5,
+ \quad f=F\frac{DG}{4n_vn_l},
+ \quad p_h=\frac{DG_1(n_v,\alpha)}{4n_v}.
+\]
+Вес нового направления:
+\[
+ \vect\beta\leftarrow\vect\beta\odot f\,\frac{n_l}{p_h}.
+\]
+Сэмплирование выбирает видимую микронормаль через stretched view vector и
+disk-параметризацию; это не простое равномерное сэмплирование GGX.
+
+\subsection{Mirror и гладкий metal}
+
+\[
+ \vect\omega_r=\vect d-2(\vect d\cdot\vect n)\vect n,
+ \qquad \vect\beta\leftarrow\vect\beta\odot\vect{albedo}\,reflectivity.
+\]
+Для metal дополнительно применяется цветной $F$ из предыдущей формулы. Mirror
+не получает direct-light sample и отражает идеально.
+
+\subsection{Dielectric: интерфейс сред}
+
+Текущая среда определяется не только front/back флагом: shader ищет ближайший
+dielectric object, содержащий точку после ULP-offset. Поэтому вложенные стеклянные
+объекты имеют стекоподобную семантику.
+
+\[
+ \eta=\frac{\eta_1}{\eta_2},\quad
+ c=\max(-\vect d\cdot\vect n,0),\quad
+ s_t^2=\eta^2(1-c^2).
+\]
+При $s_t^2>1$ возникает TIR и используется reflection. Иначе:
+\[
+ \vect r_\perp=\eta(\vect d+c\vect n),\qquad
+ \vect r_\parallel=-\sqrt{1-\|\vect r_\perp\|^2}\vect n,
+ \quad \vect d_t=\vect r_\perp+\vect r_\parallel.
+\]
+Вероятность отражения --- точные уравнения Френеля:
+\[
+ s_t^2=\eta^2(1-c^2),\quad c_t=\sqrt{1-s_t^2},
+\]
+\[
+ R=\frac12\left[
+ \left(\frac{\eta c-c_t}{\eta c+c_t}\right)^2+
+ \left(\frac{c-\eta c_t}{c+\eta c_t}\right)^2\right].
+\]
+При преломлении $\vect\beta\leftarrow\eta^2\vect\beta$ и обновляется
+$etaScale\leftarrow etaScale/\eta^2$; при отражении вес равен $(1,1,1)$.
+На пути внутри dielectric прозрачность дополнительно умножается на
+\[
+ T_{glass}(d)=\exp(-\vect\sigma\,scale\,d)\odot
+ \vect{tint}^{\,d}.
 \]
 
-Нормаль: $\mathbf{n}$ (уже известна).
+\section{Прямое освещение и MIS}
 
-\begin{figure}[h]
+\subsection{Список света}
+
+Источники выбираются из emissive sphere и box. За одну вершину shader samples
+$K=\min(|\mathcal L|,8)$ источников; если источников больше восьми, стартовый индекс
+случайный и берётся циклическое окно. Inclusion factor:
+\[
+ q=\min\left(1,\frac{8}{|\mathcal L|}\right).
+\]
+
+Для spherical light точка выбирается по видимому телесному углу. В терминах центра
+на расстоянии $d$ и радиуса $r$:
+\[
+ s^2=\frac{r^2}{d^2},\quad 1-\cos\theta=\frac{s^2}{1+\sqrt{1-s^2}},
+ \quad p_\Omega=\frac{1}{2\pi(1-\cos\theta)}.
+\]
+Для box видимые грани имеют площади
+\[
+ A_x=s_ys_z,\quad A_y=s_xs_z,\quad A_z=s_xs_y;
+\]
+грань обнуляется, если reference находится внутри её slab. После выбора точки
+равномерно по суммарной площади $A$:
+\[
+ p_\Omega=\frac{r^2}{A\,|\vect n_L\cdot(-\vect\omega)|}.
+\]
+
+Для shadow ray проверяется occlusion всеми объектами, кроме самого emitter; затем
+учитывается glass/fog transmittance. Поверхностный direct contribution:
+\[
+ \Delta L=\vect f\odot\vect L_e\odot T\;
+ \frac{n_l}{p_Lq+[\text{continuation}]p_B}.
+\]
+При первом/последнем bounce $p_B$ не добавляется, иначе denominator реализует
+MIS balance heuristic между light sampling и BSDF sampling.
+
+При прямом попадании случайного пути в источник его вклад умножается на
+\[
+ w_e=\frac{p_{prev}}{p_{prev}+p_Lq},
+\]
+а если предыдущий PDF нулевой, $w_e=1$.
+
+\begin{figure}[ht]
 \centering
-\begin{tikzpicture}[scale=1.3]
-    % Плоскость
-    \draw[thick,blue,fill=blue!20] (-2,-1) -- (2,-1) -- (2,1) -- (-2,1) -- cycle;
-    \coordinate (planePoint) at (0,0);
-    \fill[black] (planePoint) circle (1pt) node[below right] {$\mathbf{p}$};
-    
-    % Нормаль плоскости
-    \draw[->,thick,green!60!black] (planePoint) -- ($(planePoint) + (0,1.2)$) node[right] {$\mathbf{n}$};
-    
-    % Луч
-    \coordinate (rayStart) at (-2.5,0.5);
-    \coordinate (hitPoint) at (0,0);
-    \draw[->,thick,red] (rayStart) -- (hitPoint);
-    \draw[->,thick,red,dashed] (hitPoint) -- ($(hitPoint) + 1.2*(hitPoint) - 1.2*(rayStart)$);
-    
-    % Точки
-    \fill[black] (rayStart) circle (1.5pt) node[below left] {$\mathbf{o}$};
-    \fill[red] (hitPoint) circle (1.5pt) node[above left] {$\mathbf{hit}$};
-    
-    % Вектор направления
-    \draw[->,thick,purple] ($(rayStart) + 0.3*(hitPoint) - 0.3*(rayStart)$) -- ($(rayStart) + 0.5*(hitPoint) - 0.5*(rayStart)$) node[midway,above] {$\mathbf{d}$};
-    
-    % Угол
-    \draw[<->] ($(hitPoint) + (0.3,0)$) arc (0:90:0.3) node[midway,right] {$\theta$};
+\begin{tikzpicture}[>=Latex,scale=1.0]
+  \draw[thick,blue] (-3,0)--(3,0) node[right] {surface};
+  \fill (0,0) circle (2pt) node[below left] {$x$};
+  \draw[->,thick,green!60!black] (0,0)--(0,1.4) node[right] {$n$};
+  \draw[thick,orange,fill=orange!25] (1.8,2.1) circle (0.45);
+  \fill (1.8,2.1) circle (2pt) node[above] {light};
+  \draw[->,thick,red] (0,0)--(1.8,2.1) node[midway,left] {$\omega_i$};
+  \draw[dashed] (0,0)--(1.8,1.65);
+  \node at (0,-0.65) {$\Delta L\propto f\,L_e\,T\,n_l/(p_Lq+p_B)$};
 \end{tikzpicture}
-\caption{Пересечение луча с плоскостью}
+\caption{Next Event Estimation: отдельный shadow ray к сэмплу источника.}
 \end{figure}
 
-\subsection{Пересечение с кубом (AABB)}
+\section{Итеративный path loop}
 
-Ограничивающий параллелепипед (Axis-Aligned Bounding Box, AABB) задается двумя точками $\mathbf{b}_{\min}$ и $\mathbf{b}_{\max}$.
+Для каждого bounce $b=0,\ldots,D-1$ shader выполняет следующие действия:
 
-Для каждой оси $i \in \{x, y, z\}$ вычисляются параметры пересечения:
+\begin{enumerate}
+\item Проверяет $\max(\beta_r,\beta_g,\beta_b)>0$.
+\item Ищет ближайшее пересечение до $R_{\max}$ и получает расстояние $d$.
+\item Если луч ещё не внутри стекла и включён volumetric fog, sample-ит возможное
+  рассеяние до ближайшей поверхности/неба. При событии изменяет throughput, добавляет
+  direct volume light, сэмплирует фазу и продолжает путь из точки объёма.
+\item Иначе умножает throughput на стеклянное затухание текущей среды.
+\item При miss добавляет $\vect\beta\odot background(\vect d)$ и завершает путь.
+  Для legacy non-volumetric fog с affect-sky фон дополнительно проходит
+  $F(L,d)=Le^{-density\,d}+C(1-e^{-density\,d})$ при $d=50$.
+\item При emissive hit добавляет $\vect\beta\odot emit\cdot w_e$ только для
+  front face и завершает путь.
+\item Для Lambert/metal/mirror/dielectric вычисляет direct/BSDF/refraction,
+  сохраняет $p_{prev}$ и previous point, умножает throughput и строит offset ray.
+\item После $b\ge3$ запускает Russian roulette:
+  \[
+   p_{rr}=\min(1,etaScale\max(\beta_r,\beta_g,\beta_b)).
+  \]
+  При отказе путь завершается, при продолжении $\vect\beta\leftarrow\vect\beta/p_{rr}$.
+\end{enumerate}
 
-\begin{align}
-t_{\text{near},i} &= \frac{b_{\min,i} - o_i}{d_i} \\
-t_{\text{far},i} &= \frac{b_{\max,i} - o_i}{d_i}
-\end{align}
+\section{Объёмный туман}
 
-Если $d_i < 0$, луч идет в обратном направлении, поэтому значения меняются местами:
-
-\begin{align}
-\text{if } d_i < 0: \quad &t_{\text{near},i} \leftrightarrow t_{\text{far},i}
-\end{align}
-
-Итоговые параметры пересечения:
-
-\begin{align}
-t_{\text{near}} &= \max(t_{\text{near},x}, t_{\text{near},y}, t_{\text{near},z}) \\
-t_{\text{far}} &= \min(t_{\text{far},x}, t_{\text{far},y}, t_{\text{far},z})
-\end{align}
-
-Пересечение существует, если:
+Если явные коэффициенты не заданы, из legacy density $d$ и scatter $q$ строится:
 \[
-t_{\text{near}} < t_{\text{far}} \quad \text{и} \quad t_{\text{far}} > 0
+ \sigma_s=dq,\qquad \sigma_a=\max(d-\sigma_s,0),\qquad
+ \sigma_t=\sigma_s+\sigma_a.
+\]
+Для heterogeneous fog коэффициенты умножаются на
+\[
+ m(\vect x)=(1-k)+2kN(\vect x),
+\]
+где $N$ --- hash/fBm noise с 1--5 октавами.
+
+GPU выбирает majorant:
+\[
+ \mu=\bigl(\max(\sigma_s,0)+\max(\sigma_a,0)\bigr)(1+k),
+\]
+с fallback на density, если физические коэффициенты нулевые. Кандидат дистанции
+delta tracking:
+\[
+ t\leftarrow t-\frac{\ln(1-\xi)}{\mu}.
+\]
+Если $t\ge d$, событие объёма не произошло. Иначе принимается с вероятностью
+$\sigma_t(\vect x)/\mu$. Вес принятого scattering event:
+\[
+ \vect w_{fog}=\operatorname{clamp}(fogColor,0,1)\frac{\sigma_s(\vect x)}{\sigma_t(\vect x)}.
+\]
+Для неоднородной shadow transmittance применяется ratio tracking:
+\[
+ T\leftarrow T\left(1-\frac{\sigma_t(\vect x)}{\mu}\right)
+\]
+на каждой случайной позиции до конца отрезка. В однородном случае shader использует
+аналитическое $T=\exp(-\mu d)$.
+
+Фаза Хеньи--Грина:
+\[
+ p_{HG}(\cos\theta)=\frac{1-g^2}{4\pi(1+g^2-2g\cos\theta)^{3/2}}.
+\]
+Volume NEE использует ту же схему максимум восьми источников, а contribution имеет
+вид
+\[
+ \Delta L_{vol}=L_e\frac{p_{HG}}{p_Lq+[\text{continuation}]p_{HG}}T_{shadow}.
 \]
 
-Параметр пересечения: $t = t_{\text{near}}$ (если $t_{\text{near}} > 0$) или $t = t_{\text{far}}$ (если луч начинается внутри куба).
-
-Нормаль определяется по ближайшей грани:
-
-\[
-\mathbf{n}_i = \begin{cases}
-(1, 0, 0) & \text{если ближайшая грань по } x \\
-(0, 1, 0) & \text{если ближайшая грань по } y \\
-(0, 0, 1) & \text{если ближайшая грань по } z
-\end{cases}
-\]
-
-с соответствующим знаком в зависимости от направления.
-
-\begin{figure}[h]
+\begin{figure}[ht]
 \centering
-\begin{tikzpicture}[scale=1.2]
-    % AABB
-    \draw[thick,blue,fill=blue!20] (-1.5,-1) rectangle (1.5,1);
-    \coordinate (bmin) at (-1.5,-1);
-    \coordinate (bmax) at (1.5,1);
-    
-    % Подписи
-    \node[below] at ($(bmin) + (0.75,0)$) {$b_{\min}$};
-    \node[above] at ($(bmax) + (-0.75,0)$) {$b_{\max}$};
-    
-    % Луч
-    \coordinate (rayStart) at (-2.5,-0.5);
-    \coordinate (hitPoint) at (-1.5,0);
-    \draw[->,thick,red] (rayStart) -- (hitPoint);
-    \draw[->,thick,red,dashed] (hitPoint) -- ($(hitPoint) + 1.5*(hitPoint) - 1.5*(rayStart)$);
-    
-    % Точки
-    \fill[black] (rayStart) circle (1.5pt) node[below left] {$\mathbf{o}$};
-    \fill[red] (hitPoint) circle (1.5pt) node[above left] {$t_{\text{near}}$};
-    
-    % Выход
-    \coordinate (exitPoint) at (1.5,0.3);
-    \fill[red] (exitPoint) circle (1.5pt) node[above right] {$t_{\text{far}}$};
-    \draw[dashed,red] (hitPoint) -- (exitPoint);
-    
-    % Нормаль
-    \draw[->,thick,green!60!black] (hitPoint) -- ($(hitPoint) + (-0.8,0)$) node[above] {$\mathbf{n}$};
+\begin{tikzpicture}[>=Latex,scale=1.0]
+  \draw[thick,blue,fill=blue!8] (-2,-1)--(3,-1)--(3,1.4)--(-2,1.4)--cycle;
+  \node[blue] at (0.5,1.05) {heterogeneous medium};
+  \fill (-2.3,0) circle (2pt) node[left] {camera};
+  \draw[->,very thick,red] (-2.3,0)--(3.3,0);
+  \foreach \x in {-1.5,-0.7,0.1,0.9,1.7,2.5}{
+    \fill[purple] (\x,0) circle (2pt);
+    \draw[->,thin,purple,dashed] (\x,0)--(2.0,1.0);
+  }
+  \fill[orange] (2.0,1.0) circle (5pt) node[above right] {emitter};
+  \node at (0,-1.45) {$t\sim\mathrm{Exp}(\mu)$, accept with $\sigma_t/\mu$, weight $\sigma_s/\sigma_t$};
 \end{tikzpicture}
-\caption{Пересечение луча с AABB (кубом)}
+\caption{Delta tracking вдоль луча и прямое освещение точки рассеяния.}
 \end{figure}
 
-\section{Материалы и BRDF}
++
+\section{Накопление, HDR и постобработка}
 
-\subsection{Уравнение рендеринга}
-
-Уравнение рендеринга описывает количество света, исходящего из точки $\mathbf{x}$ в направлении $\omega_o$:
-
+После $B_i$ путей одного pass для пикселя:
 \[
-L_o(\mathbf{x}, \omega_o) = L_e(\mathbf{x}, \omega_o) + \int_{\Omega} f_r(\mathbf{x}, \omega_i, \omega_o) L_i(\mathbf{x}, \omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+ A_{x,y}\leftarrow A_{x,y}+\sum_{j=0}^{B_i-1}L_{x,y,k+j},
+ \qquad \overline L_{x,y}=\frac{A_{x,y}}{N_i}.
 \]
+Именно $N_i$ передаётся как \code{uSampleCount}; поэтому последний неполный batch
+также усредняется корректно.
 
-где:
-\begin{itemize}
-    \item $L_o$ --- исходящая яркость (outgoing radiance)
-    \item $L_e$ --- эмиссия (emission)
-    \item $f_r$ --- BRDF (Bidirectional Reflectance Distribution Function)
-    \item $L_i$ --- входящая яркость (incoming radiance)
-    \item $\mathbf{n}$ --- нормаль поверхности
-    \item $\Omega$ --- полусфера направлений над поверхностью
-\end{itemize}
+\subsection{Тонемаппинг и 8-bit output}
 
-\subsection{Lambertian (диффузный) материал}
-
-Lambertian BRDF моделирует идеально рассеивающую поверхность:
-
+Для каждой положительной HDR-компоненты:
 \[
-f_r(\omega_i, \omega_o) = \frac{\rho}{\pi}
+ A(x)=\operatorname{clamp}\left(
+ \frac{x(2.51x+0.03)}{x(2.43x+0.59)+0.14},0,1\right),
+ \qquad C_{8}=255\sqrt{A(x)}+dither.
 \]
+NaN, infinity и отрицательные значения становятся нулём. Альфа всегда равна 255.
+Это ACES-like mapping плюс square-root gamma; это не linear-to-sRGB transfer function.
 
-где $\rho$ --- альбедо (albedo), цвет материала.
+\subsection{CPU denoise и smooth}
 
-Это означает, что поверхность отражает свет равномерно во все направления, независимо от направления падения и наблюдения.
-
-\subsection{Металлический материал --- GGX распределение}
-
-Для металлических материалов используется микрофасетная модель с распределением нормалей GGX (Trowbridge-Reitz):
-
+При включённом denoise и $S\ge4$ после readback запускаются три прохода bilateral
+фильтра на радиусах $1,2,4$. Для соседнего пикселя $j$:
 \[
-D(\mathbf{h}) = \frac{\alpha^2}{\pi((\mathbf{n} \cdot \mathbf{h})^2(\alpha^2 - 1) + 1)^2}
+ w_{sp}=\exp\left(-\frac{\Delta x^2+\Delta y^2}{2\sigma_s^2}\right),\quad
+ b=\frac{1}{2\max(\sigma_r^2\,255^2,10^{-4})},
 \]
-
-где:
-\begin{itemize}
-    \item $\mathbf{h} = \frac{\omega_i + \omega_o}{\|\omega_i + \omega_o\|}$ --- половинный вектор (half vector)
-    \item $\alpha = \text{roughness}^2$ --- параметр шероховатости
-    \item $\mathbf{n}$ --- нормаль поверхности
-\end{itemize}
-
-Для идеального зеркала (mirror) используется простое отражение:
-
 \[
-\omega_o = \text{reflect}(\omega_i, \mathbf{n}) = \omega_i - 2(\omega_i \cdot \mathbf{n})\mathbf{n}
+ w=\frac{w_{sp}}{\left(1+(\Delta R^2+\Delta G^2+\Delta B^2)b\right)^2},
+ \qquad C'=\frac{\sum_jwC_j}{\sum_jw}.
 \]
+Дополнительный smooth выключен по умолчанию; если включён, его результат смешивается
+с исходным byte-color с strength и радиусом 1--5.
 
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.5]
-    % Поверхность
-    \draw[thick,blue] (-2,0) -- (2,0);
-    \node[below] at (0,-0.2) {поверхность};
-    
-    % Нормаль
-    \draw[->,thick,green!60!black] (0,0) -- (0,1.5) node[right] {$\mathbf{n}$};
-    
-    % Падающий луч
-    \coordinate (incident) at (-1.2,1.2);
-    \draw[->,thick,red] (0,0) -- (incident) node[above left] {$\omega_i$};
-    
-    % Отраженный луч
-    \coordinate (reflected) at (1.2,1.2);
-    \draw[->,thick,orange] (0,0) -- (reflected) node[above right] {$\omega_o$};
-    
-    % Углы
-    \draw[<->] (0.3,0) arc (0:135:0.3) node[midway,above left] {$\theta_i$};
-    \draw[<->] (0.3,0) arc (0:45:0.3) node[midway,above right] {$\theta_o$};
-    
-    % Точка пересечения
-    \fill[black] (0,0) circle (1.5pt);
-    
-    % Половинный вектор (для GGX)
-    \coordinate (halfVec) at (0,1.5);
-    \draw[->,thick,purple,dashed] (0,0) -- (halfVec) node[right] {$\mathbf{h}$};
-\end{tikzpicture}
-\caption{Отражение луча от поверхности (зеркало/металл)}
-\end{figure}
+\section{Фактические настройки исполнения}
 
-\subsection{Диэлектрический материал --- закон Снеллиуса и Френель}
+\begin{longtable}{p{0.38\linewidth}p{0.52\linewidth}}
+\toprule
+Параметр & Реальное значение/правило \\
+\midrule
+Normal work group & $32\times32$ \\
+Wireframe work group & $16\times16$ \\
+Samples per pass & default $4$, clamp $1\ldots16$ \\
+Dispatch tile & старт 64, предел по умолчанию 256, диапазон 32--512; адаптируется по времени fence \\
+Max light samples & $8$ \\
+Max smooth radius & $5$ \\
+GPU texture & RGBA32F \\
+Accumulation & SSBO: $3WH$ float32 \\
+Readback & два PBO, RGBA float32 \\
+Temporal flag & target texture ping-pong есть, но shader не вызывает texture lookup предыдущего кадра \\
+Denoise & CPU, по умолчанию включён для GPU при $S\ge4$ \\
+GPU fallback & при ошибке GPU service запускает CPU renderer \\
+\bottomrule
+\end{longtable}
 
-Для прозрачных материалов (стекло, вода) используется закон Снеллиуса:
+\section{Проверка соответствия коду}
 
+Ниже перечислены точки, которые следует проверять при изменении математики:
+
+\begin{longtable}{p{0.37\linewidth}p{0.53\linewidth}}
+\toprule
+Математический блок & Источник истины в проекте \\
+\midrule
+Backend/fallback & \code{internal/usecases/render/service.go}: \code{IntoWithCancel}, \code{renderIntoGPU} \\
+Packing/stride & \code{internal/transport/gpu/packing.go}: \code{packMaterials}, \code{packObjects}, \code{packFogBlock} \\
+GL resources/readback & \code{internal/transport/gpu/setup.go}, \code{gpu.go}: \code{resizeGPUResources}, \code{tonemapHDRToRGBA} \\
+Dispatch/passes & \code{internal/transport/gpu/samples.go}: \code{samplePasses}, \code{dispatchTiles}, \code{dispatchGroups} \\
+Camera/RNG/path & \code{internal/transport/gpu/shaders.go}, \code{physics_shader.go}, \code{transport_shader.go} \\
+Lights/BSDF/MIS & \code{lighting_shader.go}, \code{physics_shader.go} \\
+Fog & \code{fog_shader.go}, \code{physics_shader.go} \\
+CPU parity & \code{internal/usecases/render/cpu_gpu_parity.go}, \code{physics.go}, \code{fog_physics.go} \\
+Validation & \code{scenes/validation/README.md} и GPU internal tests \\
+\bottomrule
+\end{longtable}
+
+Для регрессионной проверки применяются команды:
+\begin{verbatim}
+go test ./internal/transport/gpu ./internal/usecases/render ./internal/service
+go run ./cmd/validate-render -scene scenes/validation/glass_grid.json \
+  -backend gpu -width 320 -height 180 -spp 64 -seed 1 -out bin/glass.png
+PATHTRACER_GPU_INTEGRATION=1 go test ./internal/transport/gpu \
+  -run '^TestGPU(PhysicsAudit|Integration)$' -count=1 -v -timeout=180s
+\end{verbatim}
+
+В среде без аппаратного GL последний контур может быть недоступен; намеренное
+использование software Mesa требует \code{PATHTRACER\_GPU\_ALLOW\_SOFTWARE=1}.
+MSE/PSNR после ACES и gamma измеряют качество изображения, но не доказывают
+точность линейного интеграла.
+
+\section{Итоговая математическая схема}
+
+Для пикселя и sample $k$ фактическая оценка имеет вид:
 \[
-\eta_1 \sin\theta_1 = \eta_2 \sin\theta_2
+ L_k=\operatorname{PathTrace}\left(
+ \operatorname{CameraRay}(x,y,\xi_k),
+ \mathcal O,\mathcal M,\mathcal L,\mathcal F,D,R_{\max}
+ \right),
 \]
-
-где $\eta_1, \eta_2$ --- показатели преломления сред, $\theta_1, \theta_2$ --- углы падения и преломления.
-
-Вектор преломления вычисляется как:
-
-\begin{align}
-\cos\theta_1 &= -\omega_i \cdot \mathbf{n} \\
-\sin\theta_1 &= \sqrt{1 - \cos^2\theta_1} \\
-\sin\theta_2 &= \frac{\eta_1}{\eta_2} \sin\theta_1
-\end{align}
-
-Если $\sin\theta_2 > 1$, происходит полное внутреннее отражение (TIR), и луч отражается.
-
-Иначе:
-
-\begin{align}
-\cos\theta_2 &= \sqrt{1 - \sin^2\theta_2} \\
-\mathbf{r}_{\perp} &= \eta(\omega_i + \cos\theta_1 \mathbf{n}) \\
-\mathbf{r}_{\parallel} &= -\sqrt{1 - \|\mathbf{r}_{\perp}\|^2} \mathbf{n} \\
-\omega_o &= \mathbf{r}_{\perp} + \mathbf{r}_{\parallel}
-\end{align}
-
-где $\eta = \eta_1 / \eta_2$ (при входе) или $\eta = \eta_2 / \eta_1$ (при выходе).
-
-Коэффициент отражения Френеля (аппроксимация Шлика):
-
+где внутри каждого bounce:
 \[
-R(\theta) = R_0 + (1 - R_0)(1 - \cos\theta)^5
+ \begin{aligned}
+ &\text{hit/medium event}\\
+ &\beta\leftarrow\beta\odot T_{glass/fog}\\
+ &L\leftarrow L+\beta\odot(L_e+L_{direct})\\
+ &\omega_{next}\sim p_{Lambert/GGX/Fresnel/HG}\\
+ &\beta\leftarrow\beta\odot\frac{f\,|n\cdot\omega_{next}|}{p}
+   \quad\text{(где применимо)}\\
+ &\text{Russian roulette после третьего bounce}.
+ \end{aligned}
 \]
-
-где:
-
+Затем GPU выполняет:
 \[
-R_0 = \left(\frac{\eta_2 - \eta_1}{\eta_2 + \eta_1}\right)^2
+ A\leftarrow A+\sum_kL_k,\qquad
+ \overline L=\frac{A}{N},\qquad
+ C_{8}=255\sqrt{\operatorname{ACES}(\overline L)}+dither.
 \]
-
-Вероятность отражения используется для выбора между отражением и преломлением методом Монте-Карло.
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.5]
-    % Граница сред
-    \draw[thick,blue] (-2,0) -- (2,0);
-    \node[above] at (-1,0.3) {$\eta_1$ (воздух)};
-    \node[below] at (-1,-0.3) {$\eta_2$ (стекло)};
-    
-    % Нормаль
-    \draw[->,thick,green!60!black] (0,0) -- (0,1.5) node[right] {$\mathbf{n}$};
-    
-    % Падающий луч
-    \coordinate (incident) at (-1.2,1.2);
-    \draw[->,thick,red] (0,0) -- (incident) node[above left] {$\omega_i$};
-    
-    % Отраженный луч
-    \coordinate (reflected) at (1.2,1.2);
-    \draw[->,thick,orange] (0,0) -- (reflected) node[above right] {отражение};
-    
-    % Преломленный луч
-    \coordinate (refracted) at (0.8,-1.0);
-    \draw[->,thick,purple] (0,0) -- (refracted) node[below right] {преломление};
-    
-    % Углы
-    \draw[<->] (0.3,0) arc (0:135:0.3) node[midway,above left] {$\theta_1$};
-    \draw[<->] (0.25,0) arc (0:-50:0.25) node[midway,right] {$\theta_2$};
-    
-    % Точка пересечения
-    \fill[black] (0,0) circle (1.5pt);
-    
-    % Закон Снеллиуса
-    \node[below] at (0,-2) {$\eta_1 \sin\theta_1 = \eta_2 \sin\theta_2$};
-\end{tikzpicture}
-\caption{Преломление и отражение (закон Снеллиуса)}
-\end{figure}
-
-\subsection{Поглощение света (Beer-Lambert закон)}
-
-При прохождении через диэлектрик свет поглощается по закону Бугера-Ламберта:
-
-\[
-I(d) = I_0 \exp(-\sigma d)
-\]
-
-где:
-\begin{itemize}
-    \item $I_0$ --- начальная интенсивность
-    \item $\sigma = \boldsymbol{\alpha} \times \text{absorptionScale}$ --- коэффициент поглощения (вектор для RGB)
-    \item $d$ --- пройденное расстояние
-\end{itemize}
-
-В коде это реализуется как:
-
-\[
-\text{attenuation} = \exp(-\boldsymbol{\alpha} \times \text{scale} \times d)
-\]
-
-\section{Importance Sampling}
-
-\subsection{Cosine-weighted sampling для диффузных материалов}
-
-Для эффективного сэмплирования диффузных материалов используется косинусное распределение:
-
-\[
-p(\omega) = \frac{\cos\theta}{\pi}
-\]
-
-где $\theta$ --- угол между направлением и нормалью.
-
-Сэмплирование в локальной системе координат:
-
-\begin{align}
-\phi &= 2\pi \xi_1 \quad \text{(равномерно по азимуту)} \\
-\cos\theta &= \sqrt{\xi_2} \quad \text{(косинусное распределение)} \\
-\sin\theta &= \sqrt{1 - \xi_2}
-\end{align}
-
-где $\xi_1, \xi_2 \sim \mathcal{U}(0, 1)$.
-
-Направление в локальной системе:
-
-\[
-\mathbf{d}_{\text{local}} = (\sin\theta \cos\phi, \sin\theta \sin\phi, \cos\theta)
-\]
-
-Преобразование в мировую систему через ортонормированный базис $(\mathbf{u}, \mathbf{v}, \mathbf{n})$:
-
-\[
-\mathbf{d}_{\text{world}} = \mathbf{d}_{\text{local},x} \mathbf{u} + \mathbf{d}_{\text{local},y} \mathbf{v} + \mathbf{d}_{\text{local},z} \mathbf{n}
-\]
-
-PDF по направлению:
-
-\[
-p(\omega) = \frac{\cos\theta}{\pi}
-\]
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.8]
-    % Полусфера
-    \draw[thick,blue] (0,0) arc (180:0:1.5);
-    \draw[thick,blue,dashed] (0,0) arc (180:360:1.5);
-    
-    % Нормаль
-    \draw[->,thick,green!60!black] (0,0) -- (0,1.5) node[right] {$\mathbf{n}$};
-    
-    % Локальная система координат
-    \draw[->,thick,red] (0,0) -- (1.2,0) node[below] {$\mathbf{u}$};
-    \draw[->,thick,orange] (0,0) -- (0.8,0.8) node[above right] {$\mathbf{v}$};
-    
-    % Сэмплированное направление
-    \coordinate (sampleDir) at (0.6,1.2);
-    \draw[->,thick,purple] (0,0) -- (sampleDir) node[above right] {$\omega_i$};
-    
-    % Угол theta
-    \draw[<->] (0.3,0) arc (0:63:0.3) node[midway,right] {$\theta$};
-    
-    % Косинусное распределение
-    \draw[thick,red] (0,0) -- (sampleDir);
-    \draw[dashed] (sampleDir) -- ($(sampleDir) - (0,1.2)$);
-    \node[right] at ($(sampleDir) + (0.2,-0.6)$) {$\cos\theta$};
-    
-    % Точка на поверхности
-    \fill[black] (0,0) circle (1.5pt);
-    
-    % Плотность вероятности
-    \node[below] at (0,-2) {Плотность: $p(\omega) = \frac{\cos\theta}{\pi}$};
-\end{tikzpicture}
-\caption{Cosine-weighted sampling для диффузных материалов}
-\end{figure}
-
-\subsection{GGX importance sampling для металлов}
-
-Для GGX распределения используется importance sampling нормалей микроповерхности:
-
-\begin{align}
-\cos\theta_h &= \sqrt{\frac{1 - \xi_2}{1 + (\alpha^2 - 1)\xi_2}} \\
-\sin\theta_h &= \sqrt{1 - \cos^2\theta_h} \\
-\phi_h &= 2\pi \xi_1
-\end{align}
-
-Половинный вектор в локальной системе:
-
-\[
-\mathbf{h}_{\text{local}} = (\sin\theta_h \cos\phi_h, \sin\theta_h \sin\phi_h, \cos\theta_h)
-\]
-
-Преобразование в мировую систему и вычисление направления отражения:
-
-\[
-\omega_o = \text{reflect}(-\omega_i, \mathbf{h})
-\]
-
-\subsection{Next Event Estimation (NEE)}
-
-Для уменьшения дисперсии используется прямое сэмплирование источников света (Next Event Estimation).
-
-Вклад от источника света:
-
-\[
-L_{\text{direct}} = \frac{f_r(\omega_i, \omega_o) L_e \cos\theta_i \cos\theta_o}{r^2 \cdot p_A}
-\]
-
-где:
-\begin{itemize}
-    \item $L_e$ --- эмиссия источника
-    \item $\cos\theta_i$ --- косинус угла между нормалью поверхности и направлением к источнику
-    \item $\cos\theta_o$ --- косинус угла между нормалью источника и направлением от источника
-    \item $r$ --- расстояние до источника
-    \item $p_A = 1/A$ --- PDF по площади источника (для равномерного сэмплирования)
-\end{itemize}
-
-Переход от PDF по площади к PDF по направлению:
-
-\[
-p(\omega) = \frac{p_A \cos\theta_o}{r^2}
-\]
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.3]
-    % Поверхность
-    \draw[thick,blue] (-2,-1.5) -- (2,-1.5);
-    \coordinate (surfacePoint) at (0,-1.5);
-    \fill[black] (surfacePoint) circle (1.5pt) node[below] {$\mathbf{x}$};
-    
-    % Нормаль поверхности
-    \draw[->,thick,green!60!black] (surfacePoint) -- ($(surfacePoint) + (0,0.8)$) node[right] {$\mathbf{n}$};
-    
-    % Источник света (сфера)
-    \coordinate (lightCenter) at (1.5,0.5);
-    \draw[thick,orange,fill=orange!30] (lightCenter) circle (0.4cm);
-    \fill[black] (lightCenter) circle (1pt) node[above] {$\mathbf{c}$};
-    
-    % Сэмплированная точка на источнике
-    \coordinate (lightPoint) at (1.7,0.7);
-    \fill[red] (lightPoint) circle (1.5pt) node[above right] {$\mathbf{p}$};
-    
-    % Нормаль источника
-    \draw[->,thick,orange] (lightPoint) -- ($(lightPoint) + 0.3*(lightPoint) - 0.3*(lightCenter)$) node[right] {$\mathbf{n}_L$};
-    
-    % Теневой луч
-    \draw[->,thick,red] (surfacePoint) -- (lightPoint);
-    \node[midway,above left] {$r$};
-    
-    % Углы
-    \draw[<->] ($(surfacePoint) + (0.2,0)$) arc (0:45:0.2) node[midway,right] {$\theta_i$};
-    \draw[<->] ($(lightPoint) + (-0.15,-0.15)$) arc (225:270:0.2) node[midway,below] {$\theta_o$};
-    
-    % Геометрический термин
-    \node[below] at (0,-2.5) {Геометрия: $\frac{\cos\theta_i \cos\theta_o}{r^2}$};
-\end{tikzpicture}
-\caption{Next Event Estimation (NEE) --- прямое сэмплирование источника света}
-\end{figure}
-
-\subsection{Сэмплирование точки на сфере-источнике}
-
-Для сферического источника света точка сэмплируется равномерно по поверхности:
-
-\begin{align}
-z &= 1 - 2\xi_1 \quad \text{(равномерно по } z \text{)} \\
-r &= \sqrt{1 - z^2} \\
-\phi &= 2\pi \xi_2 \\
-\mathbf{p}_{\text{local}} &= (r\cos\phi, r\sin\phi, z) \\
-\mathbf{p}_{\text{world}} &= \mathbf{c} + R \cdot \frac{\mathbf{p}_{\text{local}}}{\|\mathbf{p}_{\text{local}}\|}
-\end{align}
-
-где $R$ --- радиус сферы, $\mathbf{c}$ --- центр сферы.
-
-PDF по площади:
-
-\[
-p_A = \frac{1}{4\pi R^2}
-\]
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.2]
-    % Камера
-    \coordinate (camera) at (-2.5,0);
-    \fill[black] (camera) circle (1.5pt) node[below] {камера};
-    
-    % Объекты
-    \draw[thick,blue,fill=blue!20] (-0.5,-0.5) rectangle (0.5,0.5);
-    \draw[thick,green!60!black,fill=green!20] (1.5,0) circle (0.4cm);
-    
-    % Path tracing путь
-    \coordinate (hit1) at (0,0.5);
-    \coordinate (hit2) at (1.5,0.4);
-    \coordinate (hit3) at (2.5,1.2);
-    
-    % Лучи
-    \draw[->,thick,red] (camera) -- (hit1);
-    \draw[->,thick,orange] (hit1) -- (hit2);
-    \draw[->,thick,purple] (hit2) -- (hit3);
-    \draw[->,thick,blue,dashed] (hit3) -- (3.5,2);
-    
-    % Точки пересечения
-    \fill[red] (hit1) circle (1.5pt) node[above left] {1};
-    \fill[orange] (hit2) circle (1.5pt) node[above] {2};
-    \fill[purple] (hit3) circle (1.5pt) node[above] {3};
-    
-    % Нормали
-    \draw[->,thick,green!60!black] (hit1) -- ($(hit1) + (0,0.5)$);
-    \draw[->,thick,green!60!black] (hit2) -- ($(hit2) + (0.3,0.3)$);
-    
-    % Throughput
-    \node[below] at (0,-1.5) {throughput уменьшается на каждом отскоке};
-    \draw[->] (0,-1.2) -- (0.5,-1.2) node[midway,below] {$\times$ attenuation};
-\end{tikzpicture}
-\caption{Path tracing --- трассировка случайного пути света}
-\end{figure}
-
-\section{Path Tracing алгоритм}
-
-\subsection{Рекурсивное уравнение рендеринга}
-
-Path tracing решает уравнение рендеринга методом Монте-Карло, трассируя случайные пути света:
-
-\[
-L_o(\mathbf{x}, \omega_o) = L_e(\mathbf{x}, \omega_o) + \int_{\Omega} f_r(\mathbf{x}, \omega_i, \omega_o) L_i(\mathbf{x}, \omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
-\]
-
-Метод Монте-Карло аппроксимирует интеграл:
-
-\[
-L_o \approx L_e + \frac{1}{N} \sum_{i=1}^{N} \frac{f_r(\omega_i, \omega_o) L_i(\omega_i) (\mathbf{n} \cdot \omega_i)}{p(\omega_i)}
-\]
-
-где $p(\omega_i)$ --- PDF сэмплирования направления.
-
-\subsection{Итеративный алгоритм path tracing}
-
-Вместо рекурсии используется итеративный подход:
-
-\begin{align}
-\text{throughput} &= (1, 1, 1) \quad \text{(начальное значение)} \\
-\text{radiance} &= (0, 0, 0) \\
-\text{depth} &= \text{maxDepth}
-\end{align}
-
-Для каждого отскока:
-
-\begin{align}
-\text{radiance} &\leftarrow \text{radiance} + \text{throughput} \times L_e \quad \text{(если материал эмиссивный)} \\
-\text{radiance} &\leftarrow \text{radiance} + \text{throughput} \times L_{\text{direct}} \quad \text{(NEE)} \\
-\omega_i &\sim p(\omega) \quad \text{(сэмплирование нового направления)} \\
-\text{throughput} &\leftarrow \text{throughput} \times \frac{f_r(\omega_i, \omega_o) (\mathbf{n} \cdot \omega_i)}{p(\omega_i)} \\
-\text{depth} &\leftarrow \text{depth} - 1
-\end{align}
-
-\subsection{Russian Roulette}
-
-Для раннего прекращения трассировки используется Russian Roulette:
-
-\[
-\text{continue} = \begin{cases}
-\text{true} & \text{с вероятностью } p = \min(\max(\text{throughput}), 0.95) \\
-\text{false} & \text{с вероятностью } 1 - p
-\end{cases}
-\]
-
-Если трассировка продолжается, throughput корректируется:
-
-\[
-\text{throughput} \leftarrow \frac{\text{throughput}}{p}
-\]
-
-Это обеспечивает несмещенность оценки (unbiased estimation).
-
-\subsection{Условия прекращения}
-
-Трассировка прекращается, если:
-\begin{itemize}
-    \item $\text{depth} \leq 0$ --- достигнута максимальная глубина
-    \item Луч не пересекает объекты (уходит в небо)
-    \item Russian Roulette решает прекратить трассировку
-    \item $\max(\text{throughput}) < \epsilon$ --- throughput стал слишком мал
-\end{itemize}
-
-\section{Объемное рассеяние (Volumetric Scattering)}
-
-\subsection{Уравнение переноса излучения}
-
-Уравнение переноса излучения описывает изменение яркости вдоль луча в объемной среде:
-
-\[
-\frac{dL(\mathbf{x}, \omega)}{ds} = -\sigma_t(\mathbf{x}) L(\mathbf{x}, \omega) + \sigma_s(\mathbf{x}) \int_{4\pi} p(\omega_i, \omega) L_i(\mathbf{x}, \omega_i) d\omega_i
-\]
-
-где:
-\begin{itemize}
-    \item $\sigma_t = \sigma_s + \sigma_a$ --- коэффициент экстинкции
-    \item $\sigma_s$ --- коэффициент рассеяния
-    \item $\sigma_a$ --- коэффициент поглощения
-    \item $p(\omega_i, \omega)$ --- фазовая функция
-\end{itemize}
-
-\subsection{Фазовая функция Хеньи-Грина}
-
-Фазовая функция Хеньи-Грина (Henyey-Greenstein) моделирует рассеяние в объемной среде:
-
-\[
-p(\cos\theta) = \frac{1 - g^2}{4\pi(1 + g^2 - 2g\cos\theta)^{3/2}}
-\]
-
-где:
-\begin{itemize}
-    \item $g \in [-1, 1]$ --- параметр анизотропии
-    \item $g = 0$ --- изотропное рассеяние
-    \item $g > 0$ --- рассеяние вперед (forward scattering)
-    \item $g < 0$ --- рассеяние назад (backward scattering)
-\end{itemize}
-
-\subsection{Single Scattering интеграл}
-
-Для single scattering (однократное рассеяние) интеграл упрощается. Вклад от источника света в точке $\mathbf{x}$:
-
-\[
-L_s(\mathbf{x}, \omega) = \int_0^d T(\mathbf{x}, \mathbf{x} + s\omega) \sigma_s(\mathbf{x} + s\omega) \int_{4\pi} p(\omega_i, \omega) L_e(\mathbf{x} + s\omega, \omega_i) d\omega_i ds
-\]
-
-где $T$ --- функция пропускания (transmittance):
-
-\[
-T(\mathbf{a}, \mathbf{b}) = \exp\left(-\int_0^{\|\mathbf{b} - \mathbf{a}\|} \sigma_t(\mathbf{a} + t\frac{\mathbf{b} - \mathbf{a}}{\|\mathbf{b} - \mathbf{a}\|}) dt\right)
-\]
-
-Для однородной среды:
-
-\[
-T(d) = \exp(-\sigma_t d)
-\]
-
-\subsection{Численное интегрирование}
-
-Интеграл аппроксимируется методом прямоугольников:
-
-\[
-L_s \approx \sum_{i=0}^{N-1} T(s_i) \sigma_s(\mathbf{x}_i) p(\omega_i, \omega) L_e(\mathbf{x}_i, \omega_i) \Delta s
-\]
-
-где:
-\begin{itemize}
-    \item $s_i = (i + 0.5)\Delta s$ --- позиция сэмпла
-    \item $\Delta s = d/N$ --- шаг интегрирования
-    \item $\mathbf{x}_i = \mathbf{x} + s_i \omega$ --- позиция сэмпла
-    \item $N$ --- количество шагов (обычно 24)
-\end{itemize}
-
-\subsection{Beer-Lambert закон для поглощения}
-
-При прохождении через среду свет ослабляется по закону Бугера-Ламберта:
-
-\[
-L(d) = L_0 \exp(-\sigma_a d)
-\]
-
-где $d$ --- пройденное расстояние.
-
-Для неоднородной среды:
-
-\[
-L(d) = L_0 \exp\left(-\int_0^d \sigma_a(\mathbf{x} + t\omega) dt\right)
-\]
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.3]
-    % Камера
-    \coordinate (camera) at (-2,0);
-    \fill[black] (camera) circle (1.5pt) node[below] {камера};
-    
-    % Объемная среда (туман)
-    \draw[thick,blue,fill=blue!10,opacity=0.5] (-1,-1) rectangle (2,1.5);
-    \node[blue] at (0.5,0.25) {объемная среда};
-    
-    % Источник света
-    \coordinate (light) at (1.5,1);
-    \draw[thick,orange,fill=orange!50] (light) circle (0.2cm);
-    
-    % Луч через среду
-    \draw[->,thick,red] (camera) -- (2.5,0.5);
-    
-    % Сэмплы вдоль луча
-    \foreach \i in {0,1,2,3,4} {
-        \coordinate (sample) at ($(camera) + 0.2*\i*(2.5,0.5) + 0.2*\i*(0.1,0.1)$);
-        \fill[purple] (sample) circle (1pt);
-        \draw[->,thick,purple,dashed] (sample) -- (light);
-    }
-    
-    % Функция пропускания
-    \node[below] at (0.5,-1.5) {$T(d) = \exp(-\sigma_t d)$};
-    \draw[->,thick] (0.3,-1.2) -- (0.7,-1.2) node[midway,below] {ослабление};
-\end{tikzpicture}
-\caption{Объемное рассеяние --- single scattering в тумане}
-\end{figure}
-
-\section{Накопление и усреднение сэмплов}
-
-\subsection{Накопление сэмплов}
-
-Для каждого пикселя накапливается сумма всех сэмплов:
-
-\[
-\text{accum}[i] = \sum_{s=1}^{N} L_s(i)
-\]
-
-где:
-\begin{itemize}
-    \item $i = y \times W + x$ --- линейный индекс пикселя
-    \item $L_s(i)$ --- яркость $s$-го сэмпла для пикселя $i$
-    \item $N$ --- общее количество сэмплов
-\end{itemize}
-
-В коде это реализуется как:
-
-\begin{align}
-\text{accumData}[i \times 3 + 0] &\leftarrow \text{accumData}[i \times 3 + 0] + L_s(i).r \\
-\text{accumData}[i \times 3 + 1] &\leftarrow \text{accumData}[i \times 3 + 1] + L_s(i).g \\
-\text{accumData}[i \times 3 + 2] &\leftarrow \text{accumData}[i \times 3 + 2] + L_s(i).b
-\end{align}
-
-\subsection{Усреднение}
-
-Итоговый цвет пикселя вычисляется как среднее арифметическое:
-
-\[
-\bar{L}(i) = \frac{1}{N} \sum_{s=1}^{N} L_s(i) = \frac{\text{accum}[i]}{N}
-\]
-
-где $N = \text{sampleCount}$ --- текущее количество накопленных сэмплов.
-
-Компоненты цвета:
-
-\begin{align}
-\bar{L}_r(i) &= \frac{\text{accumData}[i \times 3 + 0]}{N} \\
-\bar{L}_g(i) &= \frac{\text{accumData}[i \times 3 + 1]}{N} \\
-\bar{L}_b(i) &= \frac{\text{accumData}[i \times 3 + 2]}{N}
-\end{align}
-
-\subsection{Запись в текстуру}
-
-Итоговый цвет записывается в текстуру формата RGBA16F (16-битное число с плавающей точкой на канал):
-
-\[
-\text{imageStore}(\text{destTex}, \text{pix}, (\bar{L}_r, \bar{L}_g, \bar{L}_b, 1.0))
-\]
-
-Формат RGBA16F позволяет хранить значения вне диапазона [0, 1], что важно для HDR (High Dynamic Range) рендеринга.
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}[scale=1.2]
-    % Изображение (пиксели)
-    \foreach \x in {0,1,2,3,4} {
-        \foreach \y in {0,1,2,3,4} {
-            \draw[thick] (\x,\y) rectangle ($(\x,\y) + (1,1)$);
-            \fill[blue!20] (\x,\y) rectangle ($(\x,\y) + (1,1)$);
-        }
-    }
-    
-    % Work groups (16x16)
-    \draw[thick,red] (0,0) rectangle (2,2);
-    \draw[thick,red] (2,0) rectangle (4,2);
-    \draw[thick,red] (0,2) rectangle (2,4);
-    \draw[thick,red] (2,2) rectangle (4,4);
-    
-    \node[red] at (1,1) {WG 1};
-    \node[red] at (3,1) {WG 2};
-    \node[red] at (1,3) {WG 3};
-    \node[red] at (3,3) {WG 4};
-    
-    % Подпись
-    \node[below] at (2.5,-0.5) {Work groups (16$\times$16 потоков каждый)};
-    \node[below] at (2.5,-0.8) {Каждый пиксель обрабатывается независимо};
-\end{tikzpicture}
-\caption{Распараллеливание: work groups и обработка пикселей}
-\end{figure}
-
-\section{Оптимизации}
-
-\subsection{Кэширование вычислений}
-
-Для ускорения вычислений используются оптимизации:
-
-\subsubsection{Быстрая нормализация}
-
-Вместо стандартной нормализации используется оптимизированная версия:
-
-\[
-\mathbf{v}_{\text{norm}} = \mathbf{v} \times \text{inversesqrt}(\|\mathbf{v}\|^2)
-\]
-
-где $\text{inversesqrt}$ --- быстрая инструкция GPU для вычисления $1/\sqrt{x}$.
-
-\subsubsection{Кэширование квадратов}
-
-Часто используемые квадраты вычисляются один раз:
-
-\[
-r^2 = r \times r, \quad \alpha^2 = \alpha \times \alpha
-\]
-
-\subsubsection{Кэширование обратных значений}
-
-Обратные значения вычисляются один раз:
-
-\[
-\text{invA} = \frac{1}{a}, \quad \text{invRadius} = \frac{1}{r}
-\]
-
-\subsection{Ранний выход из циклов}
-
-Для оптимизации используются ранние выходы:
-
-\begin{itemize}
-    \item Если луч не пересекает объект, цикл прерывается
-    \item Если throughput стал слишком мал, трассировка прекращается
-    \item Если материал эмиссивный, трассировка прекращается после добавления эмиссии
-\end{itemize}
-
-\subsection{Оптимизация доступа к памяти}
-
-\begin{itemize}
-    \item Последовательный доступ к массивам объектов и материалов
-    \item Кэширование часто используемых значений в регистрах
-    \item Минимизация количества обращений к глобальной памяти
-\end{itemize}
-
-\subsection{Firefly Reduction}
-
-Для уменьшения артефактов (fireflies) от очень ярких сэмплов используется ограничение яркости:
-
-\[
-L_{\text{clamped}} = \begin{cases}
-L & \text{если } \text{luminance}(L) \leq L_{\max} \\
-L \times \frac{L_{\max}}{\text{luminance}(L)} & \text{иначе}
-\end{cases}
-\]
-
-где:
-
-\[
-\text{luminance}(L) = 0.2126 \times L_r + 0.7152 \times L_g + 0.0722 \times L_b
-\]
-
-и $L_{\max} = 500.0$ --- максимальная допустимая яркость.
-
-\section{Заключение}
-
-В данном документе представлено полное математическое обоснование работы патрейсера на видеокарте. Описаны:
-
-\begin{itemize}
-    \item Форматы данных и их передача на GPU через UBO и SSBO
-    \item Механизм распараллеливания через compute shaders
-    \item Математические формулы для генерации лучей и пересечений
-    \item BRDF для различных типов материалов
-    \item Алгоритмы importance sampling
-    \item Path tracing с Russian Roulette
-    \item Объемное рассеяние света
-    \item Накопление и усреднение сэмплов
-    \item Оптимизации для повышения производительности
-\end{itemize}
-
-Все формулы выведены из физических принципов и соответствуют реализации в коде.
+Именно последняя формула, а не clamp/Firefly reduction, является текущей границей
+между линейным HDR накопителем и отображаемым изображением.
 
 \end{document}
 
+\end{document}

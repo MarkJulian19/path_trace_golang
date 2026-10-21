@@ -1,0 +1,241 @@
+{
+  "name": "Gallery: closed room with window light shafts",
+  "camera": {
+    "position": { "x": 3.2, "y": 3.2, "z": 3.0 },
+    "target": { "x": 0.0, "y": 1.7, "z": -2.4 },
+    "up": { "x": 0, "y": 1, "z": 0 },
+    "fov": 48,
+    "aperture": 0,
+    "focusDist": 5.8,
+    "aspectRatio": 1.7777778
+  },
+  "objects": [
+    {
+      "id": "floor",
+      "type": "plane",
+      "position": { "x": 0, "y": 0, "z": 0 },
+      "size": { "x": 0, "y": 0, "z": 0 },
+      "materialId": "floor"
+    },
+    {
+      "id": "ceiling",
+      "type": "box",
+      "position": { "x": 0, "y": 6.0, "z": -1 },
+      "size": { "x": 14, "y": 0.2, "z": 12 },
+      "materialId": "ceiling"
+    },
+    {
+      "id": "back-wall",
+      "type": "box",
+      "position": { "x": 0, "y": 3.0, "z": -7 },
+      "size": { "x": 14, "y": 6, "z": 0.2 },
+      "materialId": "wall"
+    },
+    {
+      "id": "left-wall-upper",
+      "type": "box",
+      "position": { "x": -6, "y": 5.5, "z": -2 },
+      "size": { "x": 0.2, "y": 1.0, "z": 12 },
+      "materialId": "wall"
+    },
+    {
+      "id": "left-wall-lower",
+      "type": "box",
+      "position": { "x": -6, "y": 0.85, "z": -2 },
+      "size": { "x": 0.2, "y": 1.7, "z": 12 },
+      "materialId": "wall"
+    },
+    {
+      "id": "left-wall-window-back",
+      "type": "box",
+      "position": { "x": -6, "y": 3.35, "z": -7.0 },
+      "size": { "x": 0.2, "y": 4.3, "z": 2.0 },
+      "materialId": "wall"
+    },
+    {
+      "id": "left-wall-window-front",
+      "type": "box",
+      "position": { "x": -6, "y": 3.35, "z": 1.4 },
+      "size": { "x": 0.2, "y": 4.3, "z": 5.2 },
+      "materialId": "wall"
+    },
+    {
+      "id": "right-wall",
+      "type": "box",
+      "position": { "x": 6, "y": 3.0, "z": -2 },
+      "size": { "x": 0.2, "y": 6, "z": 12 },
+      "materialId": "wall"
+    },
+    {
+      "id": "front-wall",
+      "type": "box",
+      "position": { "x": 0, "y": 3.0, "z": 4 },
+      "size": { "x": 14, "y": 6, "z": 0.2 },
+      "materialId": "wall"
+    },
+    {
+      "id": "window-light-source",
+      "type": "sphere_light",
+      "position": { "x": -8.8, "y": 6.4, "z": -3.6 },
+      "size": { "x": 0.8, "y": 0, "z": 0 },
+      "materialId": "sunlight"
+    },
+    {
+      "id": "window-frame-left",
+      "type": "box",
+      "position": { "x": -5.55, "y": 3.4, "z": -5.9 },
+      "size": { "x": 0.35, "y": 3.2, "z": 0.22 },
+      "materialId": "frame"
+    },
+    {
+      "id": "window-frame-right",
+      "type": "box",
+      "position": { "x": -5.55, "y": 3.4, "z": -1.3 },
+      "size": { "x": 0.35, "y": 3.2, "z": 0.22 },
+      "materialId": "frame"
+    },
+    {
+      "id": "window-frame-top",
+      "type": "box",
+      "position": { "x": -5.55, "y": 4.95, "z": -3.6 },
+      "size": { "x": 0.35, "y": 0.22, "z": 4.8 },
+      "materialId": "frame"
+    },
+    {
+      "id": "window-frame-bottom",
+      "type": "box",
+      "position": { "x": -5.55, "y": 1.85, "z": -3.6 },
+      "size": { "x": 0.35, "y": 0.22, "z": 4.8 },
+      "materialId": "frame"
+    },
+    {
+      "id": "window-mullion-horizontal",
+      "type": "box",
+      "position": { "x": -5.55, "y": 3.4, "z": -3.6 },
+      "size": { "x": 0.35, "y": 0.14, "z": 4.1 },
+      "materialId": "frame"
+    },
+    {
+      "id": "wide-shutter-near",
+      "type": "box",
+      "position": { "x": -5.25, "y": 3.4, "z": -4.75 },
+      "size": { "x": 0.18, "y": 2.9, "z": 1.5 },
+      "materialId": "frame"
+    },
+    {
+      "id": "wide-shutter-far",
+      "type": "box",
+      "position": { "x": -5.25, "y": 3.4, "z": -2.45 },
+      "size": { "x": 0.18, "y": 2.9, "z": 1.5 },
+      "materialId": "frame"
+    },
+    {
+      "id": "window-sill",
+      "type": "box",
+      "position": { "x": -5.45, "y": 1.65, "z": -3.6 },
+      "size": { "x": 0.55, "y": 0.25, "z": 5.1 },
+      "materialId": "frame"
+    },
+    {
+      "id": "low-table",
+      "type": "box",
+      "position": { "x": -1.8, "y": 0.45, "z": -2.2 },
+      "size": { "x": 2.3, "y": 0.9, "z": 1.4 },
+      "materialId": "wood"
+    },
+    {
+      "id": "metal-bowl",
+      "type": "sphere",
+      "position": { "x": -1.8, "y": 1.15, "z": -2.2 },
+      "size": { "x": 0.55, "y": 0, "z": 0 },
+      "materialId": "metal"
+    },
+    {
+      "id": "floor-block",
+      "type": "box",
+      "position": { "x": 2.0, "y": 0.35, "z": -3.5 },
+      "size": { "x": 1.4, "y": 0.7, "z": 1.4 },
+      "materialId": "stone"
+    }
+  ],
+  "materials": [
+    {
+      "id": "floor",
+      "type": "lambert",
+      "albedo": { "r": 0.24, "g": 0.27, "b": 0.32 },
+      "rough": 0.92
+    },
+    {
+      "id": "wall",
+      "type": "lambert",
+      "albedo": { "r": 0.035, "g": 0.045, "b": 0.065 },
+      "rough": 0.96
+    },
+    {
+      "id": "ceiling",
+      "type": "lambert",
+      "albedo": { "r": 0.02, "g": 0.025, "b": 0.04 },
+      "rough": 0.98
+    },
+    {
+      "id": "frame",
+      "type": "metal",
+      "albedo": { "r": 0.015, "g": 0.018, "b": 0.025 },
+      "rough": 0.72,
+      "smoothness": 0.28,
+      "reflectivity": 0.7
+    },
+    {
+      "id": "sunlight",
+      "type": "emissive",
+      "emit": { "r": 1.0, "g": 0.92, "b": 0.72 },
+      "power": 360
+    },
+    {
+      "id": "wood",
+      "type": "lambert",
+      "albedo": { "r": 0.19, "g": 0.07, "b": 0.025 },
+      "rough": 0.88
+    },
+    {
+      "id": "stone",
+      "type": "lambert",
+      "albedo": { "r": 0.12, "g": 0.14, "b": 0.18 },
+      "rough": 0.94
+    },
+    {
+      "id": "metal",
+      "type": "metal",
+      "albedo": { "r": 0.82, "g": 0.86, "b": 0.92 },
+      "rough": 0.12,
+      "smoothness": 0.88,
+      "reflectivity": 1
+    }
+  ],
+  "background": { "r": 0.04, "g": 0.07, "b": 0.16 },
+  "sky": {
+    "type": "gradient",
+    "horizon": { "r": 0.32, "g": 0.52, "b": 0.9 },
+    "zenith": { "r": 0.06, "g": 0.18, "b": 0.55 }
+  },
+  "fog": {
+    "density": 0.045,
+    "color": { "r": 0.72, "g": 0.8, "b": 0.95 },
+    "scatter": 0.9,
+    "sigmaS": 0.038,
+    "sigmaA": 0.004,
+    "g": 0.65,
+    "heteroStrength": 0.12,
+    "noiseScale": 1.8,
+    "noiseOctaves": 3,
+    "affectSky": false,
+    "gpuVolumetric": true
+  },
+  "settings": {
+    "width": 960,
+    "height": 540,
+    "samplesPerPx": 96,
+    "maxDepth": 20,
+    "maxRayDist": 100
+  }
+}

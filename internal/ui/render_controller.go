@@ -18,6 +18,8 @@ import (
 )
 
 type renderController struct {
+	lastInteractive time.Time
+
 	sc      *scene.Scene
 	service *engine.Service
 	preview *scene.RenderSettings
@@ -41,15 +43,17 @@ type renderController struct {
 	smoothRadius   *int
 	smoothStrength *float64
 
-	currentJob  *renderJob
-	latestJob   *renderJob
-	pendingJob  *pendingRender
-	renderTimer *time.Timer
+	currentJob            *renderJob
+	latestJob             *renderJob
+	pendingJob            *pendingRender
+	renderTimer           *time.Timer
+	interactiveTimer      *time.Timer
+	pendingPreview        *previewUpdate
+	displayedPreview      *image.RGBA
+	previewPool           []*image.RGBA
+	interactiveGeneration uint64
 
-	pendingPreview   *previewUpdate
-	displayedPreview *image.RGBA
-	previewPool      []*image.RGBA
-	jobMu            sync.Mutex
+	jobMu sync.Mutex
 
 	previewMu   sync.Mutex
 	livePreview atomic.Bool
@@ -62,6 +66,7 @@ type renderController struct {
 type renderJob struct {
 	cancel    chan struct{}
 	done      chan struct{}
+	delay     time.Duration
 	final     bool
 	started   bool
 	cancelled bool
@@ -69,6 +74,7 @@ type renderJob struct {
 
 type pendingRender struct {
 	final bool
+	delay time.Duration
 }
 
 type previewUpdate struct {
@@ -88,8 +94,8 @@ type renderProgressState struct {
 	live    bool
 }
 
-func newRenderJob(final bool) *renderJob {
-	return &renderJob{cancel: make(chan struct{}), done: make(chan struct{}), final: final}
+func newRenderJob(final bool, delay time.Duration) *renderJob {
+	return &renderJob{cancel: make(chan struct{}), done: make(chan struct{}), final: final, delay: delay}
 }
 
 func (c *renderController) doRender(job *renderJob) {
@@ -448,11 +454,19 @@ func (c *renderController) stopTimerLocked() {
 	}
 }
 
+func (c *renderController) stopInteractiveTimerLocked() {
+	c.interactiveGeneration++
+	if c.interactiveTimer != nil {
+		c.interactiveTimer.Stop()
+		c.interactiveTimer = nil
+	}
+}
+
 func (c *renderController) scheduleJobLocked(job *renderJob) bool {
-	if job.final {
+	if job.final || job.delay <= 0 {
 		return true
 	}
-	c.renderTimer = time.AfterFunc(uiValue300*time.Millisecond, func() {
+	c.renderTimer = time.AfterFunc(job.delay, func() {
 		c.launchJob(job)
 	})
 	return false
@@ -481,7 +495,7 @@ func (c *renderController) finishJob(job *renderJob) {
 	c.pendingJob = nil
 	var next *renderJob
 	if pending != nil {
-		next = newRenderJob(pending.final)
+		next = newRenderJob(pending.final, pending.delay)
 		c.currentJob = next
 		c.latestJob = next
 		if !c.scheduleJobLocked(next) {
@@ -496,16 +510,25 @@ func (c *renderController) finishJob(job *renderJob) {
 }
 
 func (c *renderController) startRender(final bool) {
+	delay := uiRenderDebounce
+	if final {
+		delay = 0
+	}
+	c.startRenderWithDelay(final, delay)
+}
+
+func (c *renderController) startRenderWithDelay(final bool, delay time.Duration) {
 	c.jobMu.Lock()
 	if c.closed {
 		c.jobMu.Unlock()
 		return
 	}
+	c.stopInteractiveTimerLocked()
 	c.stopTimerLocked()
 	if c.currentJob != nil {
 		if !c.currentJob.started {
 			c.cancelJobLocked(c.currentJob)
-			c.currentJob = newRenderJob(final)
+			c.currentJob = newRenderJob(final, delay)
 			c.latestJob = c.currentJob
 			next := c.currentJob
 			immediate := c.scheduleJobLocked(next)
@@ -516,12 +539,12 @@ func (c *renderController) startRender(final bool) {
 			return
 		}
 		c.cancelJobLocked(c.currentJob)
-		c.pendingJob = &pendingRender{final: final}
+		c.pendingJob = &pendingRender{final: final, delay: delay}
 		c.service.SetRenderCancel(true)
 		c.jobMu.Unlock()
 		return
 	}
-	job := newRenderJob(final)
+	job := newRenderJob(final, delay)
 	c.currentJob = job
 	c.latestJob = job
 	immediate := c.scheduleJobLocked(job)
@@ -531,11 +554,60 @@ func (c *renderController) startRender(final bool) {
 	}
 }
 
+// startInteractiveRender запускает превью сразу, но не чаще заданного UI-интервала.
+// Это сохраняет отзывчивость перетаскивания и не создаёт рендер на каждое событие мыши.
+func (c *renderController) startInteractiveRender() {
+	// Wireframe уже работает непрерывным потоком. Перезапуск на каждое
+	// движение объекта очищает кадр и создаёт лишнюю очередь рендеров.
+	if isWireframeMode(c.service) {
+		return
+	}
+	c.jobMu.Lock()
+	if c.closed {
+		c.jobMu.Unlock()
+		return
+	}
+	wait := time.Duration(0)
+	if !c.lastInteractive.IsZero() {
+		wait = max(uiInteractiveRenderRate-time.Since(c.lastInteractive), 0)
+	}
+	if wait <= 0 {
+		c.lastInteractive = time.Now()
+		c.jobMu.Unlock()
+		c.startRenderWithDelay(false, 0)
+		return
+	}
+	if c.interactiveTimer == nil {
+		c.scheduleInteractiveTimerLocked(wait)
+	}
+	c.jobMu.Unlock()
+}
+
+func (c *renderController) scheduleInteractiveTimerLocked(wait time.Duration) {
+	generation := c.interactiveGeneration
+	c.interactiveTimer = time.AfterFunc(wait, func() {
+		c.runInteractiveTimer(generation)
+	})
+}
+
+func (c *renderController) runInteractiveTimer(generation uint64) {
+	c.jobMu.Lock()
+	if generation != c.interactiveGeneration || c.closed {
+		c.jobMu.Unlock()
+		return
+	}
+	c.interactiveTimer = nil
+	c.lastInteractive = time.Now()
+	c.jobMu.Unlock()
+	c.startRenderWithDelay(false, 0)
+}
+
 func (c *renderController) stop() {
 	c.jobMu.Lock()
 	defer c.jobMu.Unlock()
 	c.closed = true
 	c.stopTimerLocked()
+	c.stopInteractiveTimerLocked()
 	c.pendingJob = nil
 	c.cancelJobLocked(c.currentJob)
 	c.service.SetRenderCancel(true)

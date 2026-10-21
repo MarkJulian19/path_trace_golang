@@ -330,6 +330,7 @@ type objectUI struct {
 	list           *widget.List
 	typeSelect     *widget.Select
 	materialSelect *widget.Select
+	onSelect       func(int)
 	materialIDs    []string
 
 	selected int
@@ -341,6 +342,7 @@ func newObjectUI(
 	status *widget.Label,
 	clearFinalImage func(),
 	startRender func(bool),
+	onSelect func(int),
 ) *objectUI {
 	o := &objectUI{
 		sc:              sc,
@@ -348,6 +350,7 @@ func newObjectUI(
 		status:          status,
 		clearFinalImage: clearFinalImage,
 		startRender:     startRender,
+		onSelect:        onSelect,
 		selected:        -1,
 	}
 	o.typeSelect = widget.NewSelect(
@@ -364,7 +367,13 @@ func newObjectUI(
 		func() fyne.CanvasObject { return widget.NewLabel("") },
 		o.updateListItem,
 	)
-	o.list.OnSelected = func(id widget.ListItemID) { o.selected = id; o.load(id) }
+	o.list.OnSelected = func(id widget.ListItemID) {
+		o.selected = id
+		o.load(id)
+		if o.onSelect != nil {
+			o.onSelect(id)
+		}
+	}
 	o.setEnabled(false)
 	return o
 }
@@ -410,6 +419,32 @@ func (o *objectUI) load(index int) {
 	o.materialSelect.SetSelected(value.MaterialID)
 	setVecEntries(o.position, value.Position)
 	setVecEntries(o.size, value.Size)
+}
+
+func (o *objectUI) setSelected(index int) {
+	if index < 0 || index >= len(o.sc.Objects) {
+		if o.selected >= 0 {
+			o.list.Unselect(o.selected)
+		}
+		o.selected = -1
+		o.setEnabled(false)
+		return
+	}
+	if o.selected == index {
+		o.load(index)
+		return
+	}
+	o.selected = index
+	o.load(index)
+	o.list.Select(index)
+}
+
+func (o *objectUI) refreshSelected() {
+	if o.selected < 0 || o.selected >= len(o.sc.Objects) {
+		return
+	}
+	o.load(o.selected)
+	o.list.RefreshItem(o.selected)
 }
 
 func setVecEntries(entries [3]*widget.Entry, value scene.Vec3) {
@@ -476,6 +511,9 @@ func (o *objectUI) remove() {
 	o.sc.Objects = append(o.sc.Objects[:o.selected], o.sc.Objects[o.selected+1:]...)
 	o.selected = -1
 	o.list.Refresh()
+	if o.onSelect != nil {
+		o.onSelect(-1)
+	}
 	o.clearFinalImage()
 	o.status.SetText("Object removed")
 	o.startRender(false)

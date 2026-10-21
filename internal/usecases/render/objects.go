@@ -117,14 +117,14 @@ func (p *plane) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	// Оптимизация: прямое вычисление без промежуточных структур
 	// Все planes создаются горизонтальными, с нормалью (0, 1, 0).
 	denom := r.dir.y
-	if math.Abs(denom) < renderRoughnessThreshold {
+	if denom == 0 {
 		return false
 	}
 
 	pointMinusOrigY := p.point.y - r.orig.y
 	t := pointMinusOrigY / denom
 
-	if t < tMin || t > tMax {
+	if math.IsNaN(t) || math.IsInf(t, 0) || t < tMin || t > tMax {
 		return false
 	}
 
@@ -157,26 +157,20 @@ func (b *box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 }
 
 func (b *box) hitWithMode(r ray, tMin, tMax float64, rec *hitRecord, findExit bool) bool {
-	t0 := math.Inf(-1)
-	t1 := math.Inf(1)
-
-	var ok bool
-	t0, t1, ok = updateBoxInterval(t0, t1, b.min.x, b.max.x, r.orig.x, r.dir.x)
-	if !ok {
+	interval := boxInterval{entry: math.Inf(-1), exit: math.Inf(1)}
+	if !interval.update(b.min.x, b.max.x, r.orig.x, r.dir.x, v(1, 0, 0)) {
 		return false
 	}
-	t0, t1, ok = updateBoxInterval(t0, t1, b.min.y, b.max.y, r.orig.y, r.dir.y)
-	if !ok {
+	if !interval.update(b.min.y, b.max.y, r.orig.y, r.dir.y, v(0, 1, 0)) {
 		return false
 	}
-	t0, t1, ok = updateBoxInterval(t0, t1, b.min.z, b.max.z, r.orig.z, r.dir.z)
-	if !ok {
+	if !interval.update(b.min.z, b.max.z, r.orig.z, r.dir.z, v(0, 0, 1)) {
 		return false
 	}
 
-	t := t0
+	t, outwardNormal := interval.entry, interval.entryNormal
 	if findExit || t < tMin {
-		t = t1
+		t, outwardNormal = interval.exit, interval.exitNormal
 	}
 	if t < tMin || t > tMax {
 		return false
@@ -184,7 +178,6 @@ func (b *box) hitWithMode(r ray, tMin, tMax float64, rec *hitRecord, findExit bo
 	rec.t = t
 	rec.p = r.at(rec.t)
 
-	outwardNormal := b.normalAt(rec.p)
 	rec.p = b.projectSurfacePoint(rec.p, outwardNormal)
 	rec.setFaceNormal(r, outwardNormal)
 	rec.mat = &b.mat
@@ -193,6 +186,8 @@ func (b *box) hitWithMode(r ray, tMin, tMax float64, rec *hitRecord, findExit bo
 
 // projectSurfacePoint сохраняет точную координату грани для начала вторичного луча.
 func (b *box) projectSurfacePoint(point, normal vec3) vec3 {
+	point = v(clampFloat(point.x, b.min.x, b.max.x),
+		clampFloat(point.y, b.min.y, b.max.y), clampFloat(point.z, b.min.z, b.max.z))
 	switch {
 	case normal.x < 0:
 		point.x = b.min.x
@@ -210,54 +205,30 @@ func (b *box) projectSurfacePoint(point, normal vec3) vec3 {
 	return point
 }
 
-func updateBoxInterval(t0, t1, minValue, maxValue, origin, direction float64) (float64, float64, bool) {
+// boxInterval сохраняет грани, определившие вход и выход, до округления точки пересечения.
+type boxInterval struct {
+	entry, exit             float64
+	entryNormal, exitNormal vec3
+}
+
+func (interval *boxInterval) update(minValue, maxValue, origin, direction float64, normal vec3) bool {
 	if direction == 0 {
-		return t0, t1, origin >= minValue && origin <= maxValue
+		return origin >= minValue && origin <= maxValue
 	}
 	invD := 1 / direction
 	tNear := (minValue - origin) * invD
 	tFar := (maxValue - origin) * invD
-	if invD < 0 {
+	if direction < 0 {
 		tNear, tFar = tFar, tNear
+		normal = normal.mul(-1)
 	}
-	if tNear > t0 {
-		t0 = tNear
+	if tNear > interval.entry {
+		interval.entry, interval.entryNormal = tNear, normal.mul(-1)
 	}
-	if tFar < t1 {
-		t1 = tFar
+	if tFar < interval.exit {
+		interval.exit, interval.exitNormal = tFar, normal
 	}
-	return t0, t1, t1 >= t0
-}
-
-func (b *box) normalAt(point vec3) vec3 {
-	dxMin := point.x - b.min.x
-	dxMax := b.max.x - point.x
-	dyMin := point.y - b.min.y
-	dyMax := b.max.y - point.y
-	dzMin := point.z - b.min.z
-	dzMax := b.max.z - point.z
-	minDist := dxMin
-	normal := v(-1, 0, 0)
-	if dxMax < minDist {
-		minDist = dxMax
-		normal = v(1, 0, 0)
-	}
-	if dyMin < minDist {
-		minDist = dyMin
-		normal = v(0, -1, 0)
-	}
-	if dyMax < minDist {
-		minDist = dyMax
-		normal = v(0, 1, 0)
-	}
-	if dzMin < minDist {
-		minDist = dzMin
-		normal = v(0, 0, -1)
-	}
-	if dzMax < minDist {
-		normal = v(0, 0, 1)
-	}
-	return normal
+	return interval.exit >= interval.entry
 }
 
 // sceneToWorld builds hittable list from scene description.

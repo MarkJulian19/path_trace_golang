@@ -54,6 +54,7 @@ func Run(scenePath, mode string, scenes *scenecase.Scene, renderService *engine.
 	session := newUISession(sc, scenes, scenePath, renderService, runtime, uiDo)
 
 	w.SetContent(session.content())
+	w.SetMainMenu(session.mainMenu(func() { w.Close() }))
 	// Стартовый размер окна фиксированный, а не зависит напрямую от разрешения рендера.
 	w.Resize(fyne.NewSize(uiWindowWidth, uiWindowHeight))
 	// Автоматический предпросмотр при старте, чтобы сразу было видно картинку.

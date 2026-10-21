@@ -40,15 +40,25 @@ type uiSession struct {
 	liveUpdate      *widget.Check
 	camControlCheck *widget.Check
 
-	controller      *renderController
-	startRender     func(bool)
-	clearFinalImage func()
+	controller             *renderController
+	startRender            func(bool)
+	startInteractiveRender func()
+	clearFinalImage        func()
+	gizmo                  *sceneGizmo
+	leftPanel              fyne.CanvasObject
+	rightPanel             fyne.CanvasObject
+	bottomPanel            fyne.CanvasObject
+	panelRestoreBar        *fyne.Container
+	leftPanelRestore       fyne.CanvasObject
+	rightPanelRestore      fyne.CanvasObject
+	bottomPanelRestore     fyne.CanvasObject
+	workspaceSplit         *container.Split
+	centerSplit            *container.Split
+	bodySplit              *container.Split
 
-	backendSlider *widget.Slider
+	backendSelect *widget.RadioGroup
 	backendLabel  *widget.Label
 
-	previewBtn   *widget.Button
-	finalBtn     *widget.Button
 	outputPath   *widget.Entry
 	saveBtn      *widget.Button
 	saveImageBtn *widget.Button
@@ -56,19 +66,28 @@ type uiSession struct {
 	wireframeLabel   *widget.Label
 	wireframeSlider  *widget.Slider
 	renderModeSelect *widget.RadioGroup
-	cam              scene.Camera
-	lastFinalConfig  engine.Config
-	wireframeFPS     float64
+	objectUI         *objectUI
+	inspectorTabs    *container.AppTabs
+	transformSelect  *widget.RadioGroup
+	objectMoveCheck  *widget.Check
+	transformMode    editorTransformMode
 
 	denoiseSigmaS float64
 	denoiseSigmaR float64
 
-	smoothRadius     int
-	smoothStrength   float64
-	camControlActive bool
-	denoiseEnabled   bool
+	smoothRadius    int
+	smoothStrength  float64
+	cam             scene.Camera
+	lastFinalConfig engine.Config
+	wireframeFPS    float64
+	selectedObject  int
+	transformStep   float64
 
-	smoothEnabled bool
+	camControlActive  bool
+	denoiseEnabled    bool
+	smoothEnabled     bool
+	objectMoveEnabled bool
+	controlsSyncing   bool
 }
 
 func newUISession(
@@ -92,6 +111,9 @@ func newUISession(
 		denoiseSigmaR:  uiDenoiseSigmaRDefault,
 		smoothRadius:   2,
 		smoothStrength: uiHalf,
+		selectedObject: -1,
+		transformMode:  transformModeSelect,
+		transformStep:  uiObjectMoveStep,
 	}
 	s.initRender()
 	s.initSceneControls(scenePath)
@@ -101,9 +123,14 @@ func newUISession(
 func (s *uiSession) initRender() {
 	s.initLiveUpdate()
 	s.camControlCheck = widget.NewCheck(
-		"WASDQE camera control (preview)",
-		func(value bool) { s.camControlActive = value },
+		"Camera",
+		s.setCameraControlEnabled,
 	)
+	s.initRenderController()
+	s.initRenderWidgets()
+}
+
+func (s *uiSession) initRenderController() {
 	s.controller = &renderController{
 		sc: s.sc, service: s.service, preview: &s.runtime.preview, final: &s.runtime.final,
 		img: &s.runtime.img, imgCanvas: s.runtime.imgCanvas, status: s.runtime.status,
@@ -116,16 +143,30 @@ func (s *uiSession) initRender() {
 	}
 	s.controller.livePreview.Store(true)
 	s.startRender = s.controller.startRender
+	s.startInteractiveRender = s.controller.startInteractiveRender
 	s.clearFinalImage = s.controller.clearFinalImage
-	s.pickableCanvas = newScenePicker(
+}
+
+func (s *uiSession) initRenderWidgets() {
+	s.pickableCanvas, s.gizmo = newScenePicker(
 		s.sc,
 		&s.runtime.preview,
 		s.runtime.imgCanvas,
 		s.service,
 		s.runtime.status,
 		&s.startRender,
+		s.startInteractiveRender,
+		&s.selectedObject,
+		&s.transformMode,
+		&s.objectMoveEnabled,
+		func(index int) { s.selectObject(index) },
+		func() {
+			s.objectUI.refreshSelected()
+			s.clearFinalImage()
+			s.gizmo.refresh()
+		},
 	)
-	s.backendSlider, s.backendLabel = newBackendControls(
+	s.backendSelect, s.backendLabel = newBackendControls(
 		s.service,
 		s.startRender,
 		&s.denoiseEnabled,
@@ -172,22 +213,56 @@ func (s *uiSession) initSceneObjects() {
 	}
 	materialUI := newMaterialUI(s.sc, s.runtime.status, s.clearFinalImage, s.startRender)
 	s.materialsBox, s.materialForm = materialUI.boxes()
-	objectUI := newObjectUI(s.sc, materialIDs, s.runtime.status, s.clearFinalImage, s.startRender)
-	s.objectsBox, s.objectForm = objectUI.box()
+	s.objectUI = newObjectUI(
+		s.sc,
+		materialIDs,
+		s.runtime.status,
+		s.clearFinalImage,
+		s.startRender,
+		func(index int) { s.selectObject(index) },
+	)
+	s.objectsBox, s.objectForm = s.objectUI.box()
+}
+
+func (s *uiSession) selectObject(index int) {
+	if index < 0 || index >= len(s.sc.Objects) {
+		s.selectedObject = -1
+		setSelectedGPUObject(s.service, -1)
+		if s.objectUI != nil {
+			s.objectUI.setSelected(-1)
+		}
+		s.refreshGizmo()
+		s.runtime.status.SetText("No object selected")
+		return
+	}
+	s.selectedObject = index
+	setSelectedGPUObject(s.service, index)
+	if s.objectUI != nil {
+		s.objectUI.setSelected(index)
+	}
+	s.refreshGizmo()
+	if s.inspectorTabs != nil {
+		s.inspectorTabs.SelectIndex(0)
+	}
+	s.runtime.status.SetText("Selected object: " + s.sc.Objects[index].ID)
+}
+
+func (s *uiSession) refreshGizmo() {
+	if s.gizmo != nil {
+		s.gizmo.refresh()
+	}
 }
 
 func (s *uiSession) initRenderSettings() {
 	settingsUI := newRenderSettingsUI(
 		s.sc, &s.runtime.preview, &s.runtime.final, &s.runtime.maxDisplayW, &s.runtime.maxDisplayH,
 		s.runtime.status, s.mu, &s.runtime.img, s.runtime.imgCanvas, &s.lastFinalImage,
-		s.runtime.setCanvasSize, s.startRender,
+		s.runtime.setCanvasSize, s.refreshGizmo, s.startRender,
 	)
 	s.settingsBox = settingsUI.box()
 }
 
 func (s *uiSession) initActions(scenePath string) {
-	s.previewBtn = widget.NewButton("Preview render", func() { s.startRender(false) })
-	s.finalBtn = widget.NewButton("Final render", func() { s.startRender(true) })
 	s.outputPath = widget.NewEntry()
 	s.outputPath.SetText("ui_render.png")
 	s.saveBtn, s.saveImageBtn = newSaveButtons(
@@ -212,6 +287,7 @@ func (s *uiSession) initDisplayControls() {
 		s.wireframeLabel.SetText(fmtWireframeFPS(value))
 	}
 	s.renderModeSelect = newRenderModeSelect(s.service, s.startRender)
+	s.transformMode = transformModeSelect
 }
 
 func fmtWireframeFPS(value float64) string {
@@ -219,35 +295,15 @@ func fmtWireframeFPS(value float64) string {
 }
 
 func (s *uiSession) content() fyne.CanvasObject {
-	left := container.NewVScroll(
-		container.NewVBox(widget.NewLabel("Scene"), s.objectsBox, s.objectForm, s.materialsBox, s.materialForm),
-	)
-	left.SetMinSize(fyne.NewSize(uiPanelWidth, 0))
-	right := container.NewVScroll(s.rightContent())
-	right.SetMinSize(fyne.NewSize(uiValue300, 0))
-	bottom := container.NewVBox(
-		s.runtime.status,
-		s.runtime.progressBar,
-		s.runtime.timeLabel,
-		widget.NewLabel("Timeline (coming soon)"),
-	)
-	center := container.NewHSplit(container.NewStack(s.pickableCanvas), right)
-	center.SetOffset(uiRightPanelOffset)
-	main := container.NewHSplit(left, center)
-	main.SetOffset(uiLeftPanelOffset)
-	content := container.NewVSplit(main, bottom)
-	content.SetOffset(uiNineTenths)
-	return content
-}
-
-func (s *uiSession) rightContent() *fyne.Container {
-	return container.NewVBox(
-		widget.NewLabel("Render Settings"),
-		container.NewVBox(widget.NewLabel("Compute backend"), s.backendLabel, s.backendSlider),
-		widget.NewLabel("Display Mode"), s.renderModeSelect, s.wireframeLabel, s.wireframeSlider,
-		s.liveUpdate, s.camControlCheck, container.NewHBox(s.previewBtn, s.finalBtn), s.settingsBox,
-		s.cameraBox, s.videoBox, s.denoiseBox, s.smoothBox,
-		container.NewGridWithColumns(2, widget.NewLabel("Scene / Image path"), s.outputPath),
-		container.NewHBox(s.saveBtn, s.saveImageBtn),
-	)
+	s.leftPanel = s.outliner()
+	s.rightPanel = s.inspector()
+	s.bottomPanel = s.statusBar()
+	viewport := s.viewport()
+	s.centerSplit = container.NewHSplit(viewport, s.rightPanel)
+	s.centerSplit.SetOffset(uiRightPanelOffset)
+	s.workspaceSplit = container.NewHSplit(s.leftPanel, s.centerSplit)
+	s.workspaceSplit.SetOffset(uiLeftPanelOffset)
+	s.bodySplit = container.NewVSplit(s.workspaceSplit, s.bottomPanel)
+	s.bodySplit.SetOffset(uiEditorBodyOffset)
+	return container.NewBorder(s.topBar(), nil, nil, nil, s.bodySplit)
 }

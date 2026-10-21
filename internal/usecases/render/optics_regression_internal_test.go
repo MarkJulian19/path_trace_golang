@@ -115,3 +115,76 @@ func TestNestedHalfspacesChooseInnermostMedium(t *testing.T) {
 		}
 	}
 }
+
+func TestBoxNormalsNearEdges(t *testing.T) {
+	t.Parallel()
+	object := box{min: v(-1, -1, -1), max: v(1, 1, 1)}
+	for axis := range 3 {
+		for _, sign := range []float64{-1, 1} {
+			rng := &randSource{state: 123456789}
+			for range 4096 {
+				var origin, direction, normal [3]float64
+				origin[axis] = sign * (2 + rng.Float64()*5)
+				origin[(axis+1)%3] = math.Nextafter(1, 0)
+				direction[axis] = -sign * (.8 + rng.Float64())
+				direction[(axis+2)%3] = .001
+				normal[axis] = sign
+				r := ray{
+					orig: v(origin[0], origin[1], origin[2]),
+					dir:  v(direction[0], direction[1], direction[2]).unit(),
+				}
+				expected := v(normal[0], normal[1], normal[2])
+				for _, exit := range []bool{false, true} {
+					var hit hitRecord
+					if !object.hitWithMode(r, 0, 100, &hit, exit) || hit.frontFace == exit ||
+						hit.normal.sub(expected).length() > 1e-12 {
+						t.Fatalf(
+							"wrong box boundary: axis=%d sign=%g exit=%v ray=%+v hit=%+v",
+							axis,
+							sign,
+							exit,
+							r,
+							hit,
+						)
+					}
+					if hit.p.x < -1 || hit.p.x > 1 || hit.p.y < -1 || hit.p.y > 1 || hit.p.z < -1 || hit.p.z > 1 {
+						t.Fatalf("box hit lies outside its bounds: %+v", hit.p)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestGrazingPlaneIntersections(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                      string
+		height, vertical, minimum float64
+		hit, front                bool
+	}{
+		{name: "from above", height: 1e-6, vertical: -5e-7, hit: true, front: true},
+		{name: "from below", height: -1e-6, vertical: 5e-7, hit: true},
+		{name: "beyond maximum", height: 1e-4, vertical: -5e-7},
+		{name: "parallel", height: 1e-6},
+		{name: "coplanar"},
+		{name: "away", height: 1e-6, vertical: 5e-7},
+		{name: "below minimum", vertical: -5e-7, minimum: 1e-9},
+		{name: "tiny angle", height: 1e-20, vertical: -5e-21, hit: true, front: true},
+		{name: "overflow", height: 1, vertical: -math.SmallestNonzeroFloat64},
+		{name: "not finite", height: 1, vertical: math.NaN()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			floor := plane{}
+			var hit hitRecord
+			found := floor.hit(ray{orig: v(0, tc.height, 0), dir: v(1, tc.vertical, 0)}, tc.minimum, 100, &hit)
+			if found != tc.hit {
+				t.Fatalf("plane hit=%v, want %v", found, tc.hit)
+			}
+			if found && (math.Abs(hit.t-2) > 1e-12 || hit.p.y != 0 || hit.frontFace != tc.front) {
+				t.Fatalf("invalid grazing plane intersection: %+v", hit)
+			}
+		})
+	}
+}

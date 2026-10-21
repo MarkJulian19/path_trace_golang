@@ -14,17 +14,10 @@ func newBackendControls(
 	smoothEnabled *bool,
 	smoothRadius *int,
 	smoothStrength *float64,
-) (*widget.Slider, *widget.Label) {
-	slider := widget.NewSlider(0, 1)
-	slider.Step = 1
-	slider.Value = 0
+) (*widget.RadioGroup, *widget.Label) {
 	label := widget.NewLabel("Backend: CPU")
-	if service.GetBackend() == engine.BackendGPU {
-		slider.Value = 1
-		label.SetText("Backend: GPU")
-	}
-	slider.OnChanged = func(value float64) {
-		if value >= uiHalf {
+	backendSelect := widget.NewRadioGroup([]string{"CPU", "GPU"}, func(value string) {
+		if value == "GPU" {
 			label.SetText("Backend: GPU")
 			service.SetBackend(engine.BackendGPU)
 			service.SetDenoiseConfigFromUI(*denoiseEnabled, *denoiseSigmaS, *denoiseSigmaR)
@@ -34,8 +27,16 @@ func newBackendControls(
 			service.SetBackend(engine.BackendCPU)
 		}
 		startRender(false)
+	})
+	backendSelect.Horizontal = true
+	backendSelect.Required = true
+	if service.GetBackend() == engine.BackendGPU {
+		backendSelect.SetSelected("GPU")
+		label.SetText("Backend: GPU")
+	} else {
+		backendSelect.SetSelected("CPU")
 	}
-	return slider, label
+	return backendSelect, label
 }
 
 func newRenderModeSelect(

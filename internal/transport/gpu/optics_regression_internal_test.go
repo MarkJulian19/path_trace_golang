@@ -38,6 +38,11 @@ func checkGPUSamplingRegression(t *testing.T, r *gpuRenderer, prefix string) {
 	if values[20] != 0 || values[24] != 0 {
 		t.Errorf("reflected rays hit their own convex surface: spheres=%v boxes=%v", values[20], values[24])
 	}
+	for i := 8; i < 16; i++ {
+		if values[i*gpuRGBAComponents] != 1 {
+			t.Errorf("GPU grazing plane case %d failed", i-8)
+		}
+	}
 	if values[28] != 1 {
 		t.Error("GPU box intersection selected an adjacent face normal near an edge")
 	}
@@ -96,6 +101,17 @@ void main() {
   Hit hit;
   Ray ray=makeRay(vec3(0.99995,3,0),vec3(0,-1,0));
   if(hitBox(vec3(-1),vec3(1),ray,0.0,100.0,hit,false)) result=dot(hit.normal,vec3(0,1,0));
+ }
+ if(p.x>=8 && p.x<16) {
+  int index=p.x-8;
+  const vec3 origins[8]=vec3[8](vec3(0,1e-6,0),vec3(0,-1e-6,0),vec3(0,1e-4,0),vec3(0,1e-6,0),vec3(0),vec3(0,1e-6,0),vec3(0),vec3(0,1e-20,0));
+  const vec3 directions[8]=vec3[8](vec3(1,-5e-7,0),vec3(1,5e-7,0),vec3(1,-5e-7,0),vec3(1,0,0),vec3(1,0,0),vec3(1,5e-7,0),vec3(1,-5e-7,0),vec3(1,-5e-21,0));
+  Hit hit;
+  bool found=hitPlane(vec3(0),vec3(0,1,0),makeRay(origins[index],directions[index]),1e-9,100.0,hit);
+  bool expected=index==0 || index==1 || index==7;
+  bool correct=found==expected;
+  if(found) correct=correct && abs(hit.t-2.0)<1e-4 && hit.p.y==0.0 && hit.frontFace==(origins[index].y>0.0);
+  result=correct ? 1.0 : 0.0;
  }
  imageStore(destTex,p,vec4(result,result,result,1));
 }

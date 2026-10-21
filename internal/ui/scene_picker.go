@@ -16,38 +16,78 @@ func newScenePicker(
 	service *engine.Service,
 	status *widget.Label,
 	startRender *func(bool),
-) fyne.CanvasObject {
-	selected := -1
-	dragging := false
-	dragStartX, dragStartY := 0, 0
-	var dragStartPosition scene.Vec3
-	return newPickableCanvas(imgCanvas, func(x, y int) {
-		cfg := engine.Config{
-			Width: preview.Width, Height: preview.Height, SamplesPerPx: preview.SamplesPerPx,
-			MaxDepth: preview.MaxDepth, MaxRayDist: float32(preview.MaxRayDist),
-		}
-		objIndex := pickObject(sc, cfg, x, y)
-		handleObjectSelection(
-			objIndex,
-			x,
-			y,
-			sc,
-			service,
-			status,
-			&selected,
-			&dragging,
-			&dragStartX,
-			&dragStartY,
-			&dragStartPosition,
-			*startRender,
-		)
-	}, func(_, _, x2, y2 int) {
-		if !dragging {
-			return
-		}
-		dragObject(sc, engine.Config{
-			Width: preview.Width, Height: preview.Height, SamplesPerPx: preview.SamplesPerPx,
-			MaxDepth: preview.MaxDepth,
-		}, selected, dragStartX, dragStartY, x2, y2, dragStartPosition, *startRender)
-	})
+	startInteractiveRender func(),
+	selectedObject *int,
+	transformMode *editorTransformMode,
+	objectMoveEnabled *bool,
+	onSelect func(int),
+	onObjectUpdated func(),
+) (fyne.CanvasObject, *sceneGizmo) {
+	state := &scenePickerState{
+		selected: selectedObject, transformMode: transformMode, objectMoveEnabled: objectMoveEnabled,
+	}
+	picker := newPickableCanvas(
+		imgCanvas,
+		func(x, y int) { state.tap(x, y, sc, preview, service, status, startRender, onSelect) },
+		func(dx, dy int) {
+			state.drag(dx, dy, sc, preview, startInteractiveRender, onObjectUpdated)
+		},
+	)
+	gizmo := newSceneGizmo(
+		sc, preview, state.selected, transformMode, objectMoveEnabled, startInteractiveRender, onObjectUpdated,
+	)
+	return newSceneViewport(picker, gizmo), gizmo
+}
+
+type scenePickerState struct {
+	selected          *int
+	transformMode     *editorTransformMode
+	objectMoveEnabled *bool
+	dragging          bool
+}
+
+func (p *scenePickerState) tap(
+	x, y int,
+	sc *scene.Scene,
+	preview *scene.RenderSettings,
+	service *engine.Service,
+	status *widget.Label,
+	startRender *func(bool),
+	onSelect func(int),
+) {
+	cfg := engine.Config{
+		Width: preview.Width, Height: preview.Height, SamplesPerPx: preview.SamplesPerPx,
+		MaxDepth: preview.MaxDepth, MaxRayDist: float32(preview.MaxRayDist),
+	}
+	objIndex := pickObject(sc, cfg, x, y)
+	handleObjectSelection(
+		objIndex, sc, service, status, p.selected, &p.dragging, *startRender,
+	)
+	if onSelect != nil {
+		onSelect(objIndex)
+	}
+}
+
+func (p *scenePickerState) drag(
+	deltaX, deltaY int,
+	sc *scene.Scene,
+	preview *scene.RenderSettings,
+	startInteractiveRender func(),
+	onObjectUpdated func(),
+) {
+	if !p.dragging || p.transformMode == nil || *p.transformMode != transformModeMove ||
+		p.objectMoveEnabled == nil || !*p.objectMoveEnabled {
+		return
+	}
+	dragObjectDelta(
+		sc,
+		engine.Config{
+			Width: preview.Width, Height: preview.Height,
+			SamplesPerPx: preview.SamplesPerPx, MaxDepth: preview.MaxDepth,
+		},
+		*p.selected, deltaX, deltaY, startInteractiveRender,
+	)
+	if onObjectUpdated != nil {
+		onObjectUpdated()
+	}
 }

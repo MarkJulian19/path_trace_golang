@@ -4,6 +4,7 @@ These scenes accompany the [project gallery](../../docs/images/README.md). Each 
 
 - `glass_studio.json`: the original studio preview composition, with clear, amber and blue glass, a silver sphere and three large emissive box lights.
 - `fog_shafts.json`: the original warm fog preview composition, with glass and metal spheres, a window-sized emissive box and dark slats.
+- `window_fog_shafts.json`: a closed room with the camera inside, a bright sky beyond the window, three wide shutters and a separate exterior light tuned for readable shafts and shadows on the ground.
 - `fog_clear.json`: the same camera, materials, objects and lighting as `fog_shafts.json`, with only fog removed.
 - `midnight.json`: `rtx_showcase.json` with a dark solid background, no fog, zero aperture and emissive power multiplied by 0.35.
 - `prism_clear.json`: `engine_showcase.json` with fog disabled and aperture set to zero.

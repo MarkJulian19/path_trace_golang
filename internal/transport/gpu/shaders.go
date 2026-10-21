@@ -213,9 +213,9 @@ bool hitSphere(vec3 center, float radius, Ray r, float tMin, float tMax, inout H
 
 bool hitPlane(vec3 point, vec3 normal, Ray r, float tMin, float tMax, inout Hit h) {
     float denom = dot(normal, r.dir);
-    if (abs(denom) < 1e-6) return false;
+    if (denom == 0.0) return false;
     float t = dot(point - r.orig, normal) / denom;
-    if (t < tMin || t > tMax) return false;
+    if (isnan(t) || isinf(t) || t < tMin || t > tMax) return false;
     h.t = t;
     h.p = rayAt(r, t);
     // Проецируем точку на плоскость: ошибка FP32 не должна вызывать самозатенение.
@@ -729,9 +729,9 @@ bool hitSphere(vec3 center, float radius, Ray r, float tMin, float tMax, inout H
 
 bool hitPlane(vec3 point, vec3 normal, Ray r, float tMin, float tMax, inout Hit rec) {
     float denom = dot(normal, r.dir);
-    if (abs(denom) < 1e-6) return false;
+    if (denom == 0.0) return false;
     float t = dot(point - r.orig, normal) / denom;
-    if (t < tMin || t > tMax) return false;
+    if (isnan(t) || isinf(t) || t < tMin || t > tMax) return false;
     rec.t = t;
     rec.p = r.orig + t * r.dir;
     rec.p -= normal * dot(rec.p - point, normal);

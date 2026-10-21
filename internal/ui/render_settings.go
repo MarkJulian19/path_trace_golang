@@ -16,18 +16,19 @@ import (
 )
 
 type renderSettingsUI struct {
-	sc             *scene.Scene
-	preview        *scene.RenderSettings
-	final          *scene.RenderSettings
-	maxDisplayW    *float32
-	maxDisplayH    *float32
-	status         *widget.Label
-	mu             *sync.Mutex
-	img            **image.RGBA
-	imgCanvas      *canvas.Image
-	lastFinalImage *image.Image
-	setCanvasSize  func()
-	startRender    func(bool)
+	sc              *scene.Scene
+	preview         *scene.RenderSettings
+	final           *scene.RenderSettings
+	maxDisplayW     *float32
+	maxDisplayH     *float32
+	status          *widget.Label
+	mu              *sync.Mutex
+	img             **image.RGBA
+	imgCanvas       *canvas.Image
+	lastFinalImage  *image.Image
+	setCanvasSize   func()
+	viewportUpdated func()
+	startRender     func(bool)
 
 	prevW, prevH, prevSpp, prevDepth, prevMaxRayDist *widget.Entry
 	dispW, dispH                                     *widget.Entry
@@ -50,21 +51,23 @@ func newRenderSettingsUI(
 	imgCanvas *canvas.Image,
 	lastFinalImage *image.Image,
 	setCanvasSize func(),
+	viewportUpdated func(),
 	startRender func(bool),
 ) *renderSettingsUI {
 	s := &renderSettingsUI{
-		sc:             sc,
-		preview:        preview,
-		final:          final,
-		maxDisplayW:    maxDisplayW,
-		maxDisplayH:    maxDisplayH,
-		status:         status,
-		mu:             mu,
-		img:            img,
-		imgCanvas:      imgCanvas,
-		lastFinalImage: lastFinalImage,
-		setCanvasSize:  setCanvasSize,
-		startRender:    startRender,
+		sc:              sc,
+		preview:         preview,
+		final:           final,
+		maxDisplayW:     maxDisplayW,
+		maxDisplayH:     maxDisplayH,
+		status:          status,
+		mu:              mu,
+		img:             img,
+		imgCanvas:       imgCanvas,
+		lastFinalImage:  lastFinalImage,
+		setCanvasSize:   setCanvasSize,
+		viewportUpdated: viewportUpdated,
+		startRender:     startRender,
 	}
 	s.newEntries()
 	s.newFogControls()
@@ -165,6 +168,9 @@ func (s *renderSettingsUI) apply() {
 	*s.maxDisplayH = float32(parseSettingsInt(s.dispH, int(*s.maxDisplayH)))
 	s.resetPreviewImage()
 	s.setCanvasSize()
+	if s.viewportUpdated != nil {
+		s.viewportUpdated()
+	}
 	s.status.SetText("Render settings updated")
 	s.startRender(false)
 }

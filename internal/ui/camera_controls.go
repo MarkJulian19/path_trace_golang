@@ -13,18 +13,26 @@ import (
 )
 
 type cameraController struct {
-	posX    cameraEntry
-	posY    cameraEntry
-	posZ    cameraEntry
-	lookX   cameraEntry
-	lookY   cameraEntry
-	lookZ   cameraEntry
-	active  *bool
-	camera  *scene.Camera
-	scene   *scene.Scene
-	service *engine.Service
-	mu      *sync.Mutex
-	start   func(bool)
+	posX             cameraEntry
+	posY             cameraEntry
+	posZ             cameraEntry
+	lookX            cameraEntry
+	lookY            cameraEntry
+	lookZ            cameraEntry
+	active           *bool
+	camera           *scene.Camera
+	scene            *scene.Scene
+	service          *engine.Service
+	mu               *sync.Mutex
+	start            func(bool)
+	interactiveStart func()
+	viewportUpdated  func()
+
+	selectedObject    *int
+	transformMode     *editorTransformMode
+	objectMoveEnabled *bool
+	objectStep        *float64
+	objectUpdated     func()
 
 	keys       map[fyne.KeyName]bool
 	lastKeys   map[fyne.KeyName]time.Time
@@ -37,13 +45,30 @@ type cameraController struct {
 }
 
 func startSessionCamera(w fyne.Window, s *uiSession) func() {
-	return startCameraControl(
-		w.Canvas(), &s.camControlActive, &s.cam, s.sc, s.service, s.mu, s.startRender,
-		[6]cameraEntry{
+	return startCameraControlWithTransform(w.Canvas(), cameraControllerOptions{
+		active:           &s.camControlActive,
+		selectedObject:   &s.selectedObject,
+		camera:           &s.cam,
+		scene:            s.sc,
+		service:          s.service,
+		mu:               s.mu,
+		start:            s.startRender,
+		interactiveStart: s.startInteractiveRender,
+		viewportUpdated:  s.refreshGizmo,
+		entries: [6]cameraEntry{
 			s.cameraEntries[0], s.cameraEntries[1], s.cameraEntries[2],
 			s.cameraEntries[3], s.cameraEntries[4], s.cameraEntries[5],
 		},
-	)
+		transformMode:     &s.transformMode,
+		objectMoveEnabled: &s.objectMoveEnabled,
+		objectStep:        &s.transformStep,
+		objectUpdated: func() {
+			s.objectUI.refreshSelected()
+			s.refreshGizmo()
+			s.clearFinalImage()
+			s.runtime.status.SetText("Moved object: " + s.sc.Objects[s.selectedObject].ID)
+		},
+	})
 }
 
 type cameraEntry interface {
@@ -53,6 +78,7 @@ type cameraEntry interface {
 type cameraKeys struct {
 	w, s, a, d, q, e      bool
 	left, right, up, down bool
+	pageUp, pageDown      bool
 }
 
 type cameraBasis struct {
@@ -62,36 +88,25 @@ type cameraBasis struct {
 	yaw, pitch       float64
 }
 
-func startCameraControl(
-	canvas fyne.Canvas,
-	active *bool,
-	camera *scene.Camera,
-	sceneValue *scene.Scene,
-	service *engine.Service,
-	mu *sync.Mutex,
-	start func(bool),
-	entries [6]cameraEntry,
-) func() {
-	c := &cameraController{
-		active:     active,
-		camera:     camera,
-		scene:      sceneValue,
-		service:    service,
-		mu:         mu,
-		start:      start,
-		posX:       entries[0],
-		posY:       entries[1],
-		posZ:       entries[2],
-		lookX:      entries[3],
-		lookY:      entries[4],
-		lookZ:      entries[5],
-		moveSpeed:  2,
-		rotSpeed:   2,
-		keyTimeout: uiKeyTimeoutMillis * time.Millisecond,
-		keys:       make(map[fyne.KeyName]bool),
-		lastKeys:   make(map[fyne.KeyName]time.Time),
-		done:       make(chan struct{}),
-	}
+type cameraControllerOptions struct {
+	active            *bool
+	selectedObject    *int
+	camera            *scene.Camera
+	scene             *scene.Scene
+	service           *engine.Service
+	mu                *sync.Mutex
+	start             func(bool)
+	interactiveStart  func()
+	entries           [6]cameraEntry
+	transformMode     *editorTransformMode
+	objectMoveEnabled *bool
+	objectStep        *float64
+	objectUpdated     func()
+	viewportUpdated   func()
+}
+
+func startCameraControlWithTransform(canvas fyne.Canvas, options cameraControllerOptions) func() {
+	c := newCameraController(options)
 	canvas.SetOnTypedKey(c.keyPressed)
 	ticker := time.NewTicker(16 * time.Millisecond)
 	go c.run(ticker)
@@ -99,8 +114,38 @@ func startCameraControl(
 	return func() { once.Do(func() { close(c.done) }) }
 }
 
+func newCameraController(options cameraControllerOptions) *cameraController {
+	return &cameraController{
+		active:           options.active,
+		camera:           options.camera,
+		scene:            options.scene,
+		service:          options.service,
+		mu:               options.mu,
+		start:            options.start,
+		interactiveStart: options.interactiveStart,
+		viewportUpdated:  options.viewportUpdated,
+		posX:             options.entries[0],
+		posY:             options.entries[1],
+		posZ:             options.entries[2],
+		lookX:            options.entries[3],
+		lookY:            options.entries[4],
+		lookZ:            options.entries[5],
+		selectedObject:   options.selectedObject,
+		transformMode:    options.transformMode,
+		objectStep:       options.objectStep,
+		objectUpdated:    options.objectUpdated,
+		moveSpeed:        2,
+		rotSpeed:         2,
+		keyTimeout:       uiKeyTimeoutMillis * time.Millisecond,
+		keys:             make(map[fyne.KeyName]bool),
+		lastKeys:         make(map[fyne.KeyName]time.Time),
+		done:             make(chan struct{}),
+	}
+}
+
 func (c *cameraController) keyPressed(event *fyne.KeyEvent) {
-	if !*c.active {
+	objectMode := c.objectTransformActive()
+	if !*c.active && (!objectMode || !isObjectTransformKey(event.Name)) {
 		return
 	}
 	c.keysMu.Lock()
@@ -129,6 +174,10 @@ func (c *cameraController) run(ticker *time.Ticker) {
 }
 
 func (c *cameraController) tick() {
+	if c.objectTransformActive() {
+		c.tickObject()
+		return
+	}
 	if !*c.active {
 		return
 	}
@@ -148,7 +197,46 @@ func (c *cameraController) tick() {
 		return
 	}
 	c.updateSceneAndEntries()
+	if c.viewportUpdated != nil {
+		c.viewportUpdated()
+	}
 	if !isWireframeMode(c.service) {
+		if c.interactiveStart != nil {
+			c.interactiveStart()
+			return
+		}
+		c.start(false)
+	}
+}
+
+func (c *cameraController) objectTransformActive() bool {
+	return c.transformMode != nil && *c.transformMode == transformModeMove &&
+		c.objectMoveEnabled != nil && *c.objectMoveEnabled &&
+		c.selectedObject != nil && *c.selectedObject >= 0 && *c.selectedObject < len(c.scene.Objects)
+}
+
+func (c *cameraController) tickObject() {
+	c.expireKeys()
+	keys := c.currentKeys()
+	step := uiObjectMoveStep
+	if c.objectStep != nil {
+		step = max(*c.objectStep, uiFloatEpsilon)
+	}
+	index := *c.selectedObject
+	c.mu.Lock()
+	changed := applyObjectTranslation(&c.scene.Objects[index], keys, step)
+	c.mu.Unlock()
+	if !changed {
+		return
+	}
+	if c.objectUpdated != nil {
+		c.objectUpdated()
+	}
+	if !isWireframeMode(c.service) {
+		if c.interactiveStart != nil {
+			c.interactiveStart()
+			return
+		}
 		c.start(false)
 	}
 }
@@ -170,7 +258,8 @@ func (c *cameraController) currentKeys() cameraKeys {
 	return cameraKeys{
 		w: c.keys[fyne.KeyW], s: c.keys[fyne.KeyS], a: c.keys[fyne.KeyA], d: c.keys[fyne.KeyD],
 		q: c.keys[fyne.KeyQ], e: c.keys[fyne.KeyE], left: c.keys[fyne.KeyLeft], right: c.keys[fyne.KeyRight],
-		up: c.keys[fyne.KeyUp], down: c.keys[fyne.KeyDown],
+		up: c.keys[fyne.KeyUp], down: c.keys[fyne.KeyDown], pageUp: c.keys[fyne.KeyPageUp],
+		pageDown: c.keys[fyne.KeyPageDown],
 	}
 }
 

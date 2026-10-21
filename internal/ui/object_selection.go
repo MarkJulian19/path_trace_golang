@@ -10,14 +10,12 @@ import (
 )
 
 func handleObjectSelection(
-	objIndex, x, y int,
+	objIndex int,
 	sc *scene.Scene,
 	service *engine.Service,
 	status *widget.Label,
 	selected *int,
 	dragging *bool,
-	dragStartX, dragStartY *int,
-	dragStartPosition *scene.Vec3,
 	startRender func(bool),
 ) {
 	*selected = objIndex
@@ -25,19 +23,23 @@ func handleObjectSelection(
 		status.SetText("No object selected")
 		setSelectedGPUObject(service, -1)
 		*dragging = false
-		startRender(false)
+		startSelectionPreview(service, startRender)
 		return
 	}
 	status.SetText(fmt.Sprintf("Selected object: %d", objIndex))
 	setSelectedGPUObject(service, objIndex)
 	if objIndex >= len(sc.Objects) {
-		startRender(false)
+		startSelectionPreview(service, startRender)
 		return
 	}
-	*dragStartPosition = sc.Objects[objIndex].Position
-	*dragStartX = x
-	*dragStartY = y
 	*dragging = true
+	startSelectionPreview(service, startRender)
+}
+
+func startSelectionPreview(service *engine.Service, startRender func(bool)) {
+	if isWireframeMode(service) || startRender == nil {
+		return
+	}
 	startRender(false)
 }
 
