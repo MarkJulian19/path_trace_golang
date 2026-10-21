@@ -17,42 +17,95 @@ const (
 )
 
 type material struct {
-	typ        materialType
-	albedo     vec3
-	rough      float64
-	ior        float64
-	emit       vec3
-	absorption vec3 // для диэлектриков: поглощение света при прохождении через материал
+	typ             materialType
+	albedo          vec3
+	rough           float64
+	ior             float64
+	emit            vec3
+	absorption      vec3 // для диэлектриков: поглощение света при прохождении через материал
+	smoothness      float64
+	reflectivity    float64
+	tint            vec3
+	absorptionScale float64
 }
 
 func convertMaterial(m scene.Material) material {
 	al := v(m.Albedo.R, m.Albedo.G, m.Albedo.B)
-	em := v(m.Emit.R*m.Power, m.Emit.G*m.Power, m.Emit.B*m.Power)
-	abs := v(m.Absorption.R, m.Absorption.G, m.Absorption.B)
 
 	switch m.Type {
 	case scene.MaterialLambert:
-		return material{typ: matLambert, albedo: al, rough: clamp01(m.Rough), absorption: vec3{x: 0, y: 0, z: 0}}
+		return material{typ: matLambert, albedo: al, rough: clamp01(m.Rough), tint: v(1, 1, 1)}
 	case scene.MaterialMetal:
-		// Для металлов используем Smoothness, если задан, иначе вычисляем из Rough
-		rough := m.Rough
-		if m.Smoothness > 0 {
-			rough = 1.0 - clamp01(m.Smoothness)
-		}
-		return material{typ: matMetal, albedo: al, rough: clamp01(rough), absorption: vec3{x: 0, y: 0, z: 0}}
+		return convertMetalMaterial(m, al)
 	case scene.MaterialDielectric:
-		ior := m.IOR
-		if ior == 0 {
-			ior = 1.5
-		}
-		return material{typ: matDielectric, albedo: al, ior: ior, absorption: abs}
+		return convertDielectricMaterial(m, al)
 	case scene.MaterialEmissive:
-		return material{typ: matEmissive, emit: em, absorption: vec3{x: 0, y: 0, z: 0}}
+		return material{typ: matEmissive, emit: emissiveColor(m), tint: v(1, 1, 1)}
 	case scene.MaterialMirror:
-		return material{typ: matMirror, albedo: al, absorption: vec3{x: 0, y: 0, z: 0}}
+		return material{typ: matMirror, albedo: al, reflectivity: materialReflectivity(m), tint: v(1, 1, 1)}
 	default:
-		return material{typ: matLambert, albedo: al, rough: clamp01(m.Rough), absorption: vec3{x: 0, y: 0, z: 0}}
+		return material{typ: matLambert, albedo: al, rough: clamp01(m.Rough), tint: v(1, 1, 1)}
 	}
+}
+
+func convertMetalMaterial(m scene.Material, albedo vec3) material {
+	return material{
+		typ:          matMetal,
+		albedo:       albedo,
+		rough:        clamp01(m.Rough),
+		smoothness:   materialSmoothness(m),
+		reflectivity: materialReflectivity(m),
+		tint:         v(1, 1, 1),
+	}
+}
+
+func convertDielectricMaterial(m scene.Material, albedo vec3) material {
+	ior := m.IOR
+	if ior == 0 {
+		ior = renderDefaultIOR
+	}
+	return material{
+		typ:             matDielectric,
+		albedo:          albedo,
+		ior:             ior,
+		absorption:      v(m.Absorption.R, m.Absorption.G, m.Absorption.B),
+		tint:            materialTint(m),
+		absorptionScale: materialAbsorptionScale(m),
+	}
+}
+
+func emissiveColor(m scene.Material) vec3 {
+	return v(m.Emit.R*m.Power, m.Emit.G*m.Power, m.Emit.B*m.Power)
+}
+
+func materialSmoothness(m scene.Material) float64 {
+	value := m.Smoothness
+	if value == 0 && m.Type == scene.MaterialMetal {
+		value = renderUnitValue - m.Rough
+	}
+	return clamp01(value)
+}
+
+func materialReflectivity(m scene.Material) float64 {
+	value := m.Reflectivity
+	if value == 0 && (m.Type == scene.MaterialMetal || m.Type == scene.MaterialMirror) {
+		value = renderUnitValue
+	}
+	return clamp01(value)
+}
+
+func materialAbsorptionScale(m scene.Material) float64 {
+	if m.AbsorptionScale == 0 && m.Type == scene.MaterialDielectric {
+		return renderThroughputCutoff
+	}
+	return m.AbsorptionScale
+}
+
+func materialTint(m scene.Material) vec3 {
+	if m.Tint.R == 0 && m.Tint.G == 0 && m.Tint.B == 0 && m.Type == scene.MaterialDielectric {
+		return v(1, 1, 1)
+	}
+	return v(m.Tint.R, m.Tint.G, m.Tint.B)
 }
 
 func clamp01(x float64) float64 {
@@ -65,34 +118,18 @@ func clamp01(x float64) float64 {
 	return x
 }
 
-func (m material) emitted() vec3 {
+func (m *material) emitted() vec3 {
 	if m.typ == matEmissive {
 		return m.emit
 	}
 	return vec3{x: 0, y: 0, z: 0} // Прямое создание вместо v()
 }
 
-func (m material) scatter(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
-	switch m.typ {
-	case matLambert:
-		return m.scatterLambert(rng, rec)
-
-	case matMetal:
-		return m.scatterMetal(rng, rIn, rec)
-
-	case matDielectric:
-		return m.scatterDielectric(rng, rIn, rec)
-
-	case matEmissive:
-		return false, vec3{x: 0, y: 0, z: 0}, ray{}
-
-	case matMirror:
-		return m.scatterMirror(rIn, rec)
-	}
-	return false, vec3{x: 0, y: 0, z: 0}, ray{}
+func (m *material) scatterEmissive() (bool, vec3, ray) {
+	return false, vec3{}, ray{}
 }
 
-func (m material) scatterLambert(rng *randSource, rec *hitRecord) (bool, vec3, ray) {
+func (m *material) scatterLambert(rng *randSource, rec *hitRecord) (bool, vec3, ray) {
 	scatteredDir := randomCosineDirection(rec.normal, rng)
 	if m.rough > renderRoughnessThreshold {
 		randomOffset := randomInUnitSphere(rng)
@@ -104,7 +141,7 @@ func (m material) scatterLambert(rng *randSource, rec *hitRecord) (bool, vec3, r
 	return true, m.albedo, ray{orig: rec.p, dir: scatteredDir}
 }
 
-func (m material) scatterMetal(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
+func (m *material) scatterMetal(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
 	dirLen := rIn.dir.length()
 	if dirLen == 0 {
 		return false, vec3{}, ray{orig: rec.p, dir: rIn.dir}
@@ -127,7 +164,7 @@ func (m material) scatterMetal(rng *randSource, rIn ray, rec *hitRecord) (bool, 
 	return true, m.albedo, ray{orig: rec.p, dir: scatteredDir}
 }
 
-func (m material) scatterDielectric(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
+func (m *material) scatterDielectric(rng *randSource, rIn ray, rec *hitRecord) (bool, vec3, ray) {
 	attenuation := vec3{x: 1, y: 1, z: 1}
 	refractionRatio := m.ior
 	if rec.frontFace {
@@ -148,7 +185,7 @@ func (m material) scatterDielectric(rng *randSource, rIn ray, rec *hitRecord) (b
 	return true, attenuation, ray{orig: rec.p, dir: direction}
 }
 
-func (m material) scatterMirror(rIn ray, rec *hitRecord) (bool, vec3, ray) {
+func (m *material) scatterMirror(rIn ray, rec *hitRecord) (bool, vec3, ray) {
 	dirLen := rIn.dir.length()
 	if dirLen == 0 {
 		return false, vec3{}, ray{orig: rec.p, dir: rIn.dir}

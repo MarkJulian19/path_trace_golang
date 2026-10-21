@@ -18,6 +18,8 @@ uniform float uMaxRayDist; // Максимальная длина луча (дл
 uniform uint uFrameSeed;
 uniform int uSampleCount; // Текущее количество накопленных сэмплов
 uniform int uSelectedObject; // Индекс выбранного объекта (-1 = нет выбора)
+uniform ivec2 uDispatchOffset;
+uniform bool uTemporalEnabled;
 
 // Камера (совпадает с scene.Camera)
 layout(std140, binding = 1) uniform CameraBlock {
@@ -35,7 +37,9 @@ layout(std140, binding = 2) uniform SkyBlock {
     // Используем float для skyType, чтобы соответствовать передаче данных из Go (float32).
     // 0.0 = background color, 1.0 = solid, 2.0 = gradient
     float skyType;
-    vec3 _padSky0;    // выравнивание std140
+    float _padSky0;
+    float _padSky1;
+    float _padSky2;
     vec4 skyColor;    // background or solid color
     vec4 skyHorizon;  // gradient horizon
     vec4 skyZenith;   // gradient zenith
@@ -1395,7 +1399,7 @@ vec3 rayColor(Ray r, inout uint state) {
             
             if (isRoughMetal) {
                 // Используем GGX importance sampling для шероховатых металлов
-                newDir = sampleGGX(viewDir, h.normal, metalRough, state);
+                newDir = sampleGGX(-viewDir, h.normal, metalRough, state);
                 
                 // Для шероховатых металлов учитываем, что не весь свет отражается
                 // Оптимизация: кэшируем metalRough^2
@@ -1640,7 +1644,7 @@ vec3 rayColor(Ray r, inout uint state) {
 }
 
 void main() {
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy) + uDispatchOffset;
     if (pix.x >= uWidth || pix.y >= uHeight) {
         return;
     }
@@ -1670,53 +1674,55 @@ void main() {
 
     vec3 col = vec3(0.0);
     
-    // Stratified sampling: используем NxN сетку для первого сэмпла
-    // Вычисляем размер страты (например, 4x4 = 16 страт)
+    // Stratified sampling: используем NxN сетку, когда сэмплов достаточно
+    // для заполнения сетки. При меньшем количестве сэмплов используем
+    // обычный jittered fallback, иначе max(1, total/strata) незаметно
+    // увеличивает фактическое число лучей и нарушает нормализацию.
     int strataSize = 4; // можно сделать настраиваемым
     int totalStrata = strataSize * strataSize;
-    int samplesPerStratum = max(1, totalSamplesThisPass / totalStrata);
-    int extraSamplesStratum = totalSamplesThisPass - samplesPerStratum * totalStrata;
-    
-    int sampleIdx = 0;
-    
-    // Проходим по всем стратам
-    for (int sy = 0; sy < strataSize; sy++) {
-        for (int sx = 0; sx < strataSize; sx++) {
-            int samplesInStratum = samplesPerStratum;
-            if (sy * strataSize + sx < extraSamplesStratum) {
-                samplesInStratum++;
-            }
-            
-            for (int s = 0; s < samplesInStratum; s++) {
-                // Случайная точка внутри страты
-                float jitterX = rng(state);
-                float jitterY = rng(state);
-                
-                // Координаты страты в [0,1]
-                float stratumU = (float(sx) + jitterX) / float(strataSize);
-                float stratumV = (float(sy) + jitterY) / float(strataSize);
-                
-                // Преобразуем в координаты пикселя
-                float u = (float(pix.x) + stratumU) / float(uWidth - 1);
-                float fy = float(uHeight - 1 - pix.y);
-                float v = (fy + stratumV) / float(uHeight - 1);
-                
-                Ray r;
-                buildCamera(vec2(u, v), r, state);
-                col += rayColor(r, state);
-                sampleIdx++;
+
+    if (totalSamplesThisPass >= totalStrata) {
+        int samplesPerStratum = totalSamplesThisPass / totalStrata;
+        int extraSamplesStratum = totalSamplesThisPass - samplesPerStratum * totalStrata;
+
+        // Проходим по всем стратам
+        for (int sy = 0; sy < strataSize; sy++) {
+            for (int sx = 0; sx < strataSize; sx++) {
+                int samplesInStratum = samplesPerStratum;
+                if (sy * strataSize + sx < extraSamplesStratum) {
+                    samplesInStratum++;
+                }
+
+                for (int s = 0; s < samplesInStratum; s++) {
+                    // Случайная точка внутри страты
+                    float jitterX = rng(state);
+                    float jitterY = rng(state);
+
+                    // Координаты страты в [0,1]
+                    float stratumU = (float(sx) + jitterX) / float(strataSize);
+                    float stratumV = (float(sy) + jitterY) / float(strataSize);
+
+                    // Преобразуем в координаты пикселя
+                    float u = (float(pix.x) + stratumU) / float(max(uWidth - 1, 1));
+                    float fy = float(uHeight - 1 - pix.y);
+                    float v = (fy + stratumV) / float(max(uHeight - 1, 1));
+
+                    Ray r;
+                    buildCamera(vec2(u, v), r, state);
+                    col += rayColor(r, state);
+                }
             }
         }
-    }
-    
-    // Добавляем оставшиеся сэмплы (если totalSamplesThisPass не кратно totalStrata)
-    for (int s = sampleIdx; s < totalSamplesThisPass; s++) {
-        float u = (float(pix.x) + rng(state)) / float(uWidth - 1);
-        float fy = float(uHeight - 1 - pix.y);
-        float v = (fy + rng(state)) / float(uHeight - 1);
-        Ray r;
-        buildCamera(vec2(u, v), r, state);
-        col += rayColor(r, state);
+    } else {
+        // При малом бюджете каждая итерация должна давать ровно один луч.
+        for (int s = 0; s < totalSamplesThisPass; s++) {
+            float u = (float(pix.x) + rng(state)) / float(max(uWidth - 1, 1));
+            float fy = float(uHeight - 1 - pix.y);
+            float v = (fy + rng(state)) / float(max(uHeight - 1, 1));
+            Ray r;
+            buildCamera(vec2(u, v), r, state);
+            col += rayColor(r, state);
+        }
     }
     
     // Усредняем по количеству сэмплов в этом проходе
@@ -1741,13 +1747,13 @@ void main() {
     
     // ========== УЛУЧШЕННЫЙ TEMPORAL ACCUMULATION ==========
     // Используем предыдущий кадр для уменьшения шума с адаптивными весами
-    vec2 uv = (vec2(pix) + 0.5) / vec2(uWidth, uHeight);
-    vec3 prevCol = texture(prevFrameTex, uv).rgb;
-    
-    // Адаптивный вес смешивания на основе разницы цветов
-    float blendWeight = 0.1; // Базовый вес для нового кадра
-    
-    if (sampleCount > 1.0) {
+    if (uTemporalEnabled && sampleCount > 1.0) {
+        vec2 uv = (vec2(pix) + 0.5) / vec2(uWidth, uHeight);
+        vec3 prevCol = texture(prevFrameTex, uv).rgb;
+
+        // Адаптивный вес смешивания на основе разницы цветов
+        float blendWeight = 0.1; // Базовый вес для нового кадра
+
         // Вычисляем разницу между текущим и предыдущим кадром
         vec3 colorDiff = abs(accumCol - prevCol);
         float diffLum = dot(colorDiff, vec3(0.299, 0.587, 0.114));
@@ -1792,6 +1798,7 @@ uniform int uMaxDepth;
 uniform uint uFrameSeed;
 uniform int uSampleCount;
 uniform int uSelectedObject; // Индекс выбранного объекта (-1 = нет выбора)
+uniform ivec2 uDispatchOffset;
 
 layout(std140, binding = 1) uniform CameraBlock {
     vec4 camPos;
@@ -2135,15 +2142,15 @@ vec3 wireframeColor(Ray r, inout uint state) {
 }
 
 void main() {
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy) + uDispatchOffset;
     if (pix.x >= uWidth || pix.y >= uHeight) return;
     
     uint state = uint(pix.y * uWidth + pix.x) + uFrameSeed;
     
     // Для wireframe используем один сэмпл
-    float u = float(pix.x) / float(uWidth - 1);
+    float u = float(pix.x) / float(max(uWidth - 1, 1));
     float fy = float(uHeight - 1 - pix.y);
-    float v = fy / float(uHeight - 1);
+    float v = fy / float(max(uHeight - 1, 1));
     
     Ray r;
     buildCamera(vec2(u, v), r, state);

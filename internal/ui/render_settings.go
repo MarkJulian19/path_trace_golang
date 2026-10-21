@@ -25,7 +25,6 @@ type renderSettingsUI struct {
 	mu             *sync.Mutex
 	img            **image.RGBA
 	imgCanvas      *canvas.Image
-	stopCh         *chan struct{}
 	lastFinalImage *image.Image
 	setCanvasSize  func()
 	startRender    func(bool)
@@ -49,7 +48,6 @@ func newRenderSettingsUI(
 	mu *sync.Mutex,
 	img **image.RGBA,
 	imgCanvas *canvas.Image,
-	stopCh *chan struct{},
 	lastFinalImage *image.Image,
 	setCanvasSize func(),
 	startRender func(bool),
@@ -64,7 +62,6 @@ func newRenderSettingsUI(
 		mu:             mu,
 		img:            img,
 		imgCanvas:      imgCanvas,
-		stopCh:         stopCh,
 		lastFinalImage: lastFinalImage,
 		setCanvasSize:  setCanvasSize,
 		startRender:    startRender,
@@ -242,10 +239,6 @@ func clampSettings(value, minValue, maxValue float64) float64 {
 
 func (s *renderSettingsUI) resetPreviewImage() {
 	s.mu.Lock()
-	if *s.stopCh != nil {
-		close(*s.stopCh)
-		*s.stopCh = nil
-	}
 	*s.img = image.NewRGBA(image.Rect(0, 0, s.preview.Width, s.preview.Height))
 	fillImage(*s.img, color.RGBA{0, 0, 0, 255})
 	s.imgCanvas.Image = *s.img

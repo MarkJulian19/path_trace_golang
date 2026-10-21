@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image"
 	"sync"
-	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -16,55 +15,60 @@ import (
 )
 
 type uiSession struct {
-	sc      *scene.Scene
-	scenes  *scenecase.Scene
-	service *engine.Service
-	runtime *uiRuntime
-	uiDo    func(func())
-	mu      *sync.Mutex
+	cameraEntries  [6]*widget.Entry
+	lastFinalImage image.Image
 
-	stopCh          chan struct{}
-	renderTimer     *time.Timer
-	lastFinalImage  image.Image
-	lastFinalConfig engine.Config
-	wireframeFPS    float64
+	pickableCanvas fyne.CanvasObject
 
-	liveUpdate       *widget.Check
-	camControlCheck  *widget.Check
-	camControlActive bool
-	denoiseEnabled   bool
-	denoiseSigmaS    float64
-	denoiseSigmaR    float64
-	smoothEnabled    bool
-	smoothRadius     int
-	smoothStrength   float64
+	cameraBox    fyne.CanvasObject
+	videoBox     fyne.CanvasObject
+	objectsBox   fyne.CanvasObject
+	objectForm   fyne.CanvasObject
+	materialsBox fyne.CanvasObject
+	materialForm fyne.CanvasObject
+	settingsBox  fyne.CanvasObject
+
+	denoiseBox fyne.CanvasObject
+	smoothBox  fyne.CanvasObject
+	sc         *scene.Scene
+	scenes     *scenecase.Scene
+	service    *engine.Service
+	runtime    *uiRuntime
+	uiDo       func(func())
+	mu         *sync.Mutex
+
+	liveUpdate      *widget.Check
+	camControlCheck *widget.Check
 
 	controller      *renderController
 	startRender     func(bool)
 	clearFinalImage func()
 
-	pickableCanvas   fyne.CanvasObject
-	backendSlider    *widget.Slider
-	backendLabel     *widget.Label
-	cam              scene.Camera
-	cameraEntries    [6]*widget.Entry
-	cameraBox        fyne.CanvasObject
-	videoBox         fyne.CanvasObject
-	objectsBox       fyne.CanvasObject
-	objectForm       fyne.CanvasObject
-	materialsBox     fyne.CanvasObject
-	materialForm     fyne.CanvasObject
-	settingsBox      fyne.CanvasObject
-	previewBtn       *widget.Button
-	finalBtn         *widget.Button
-	outputPath       *widget.Entry
-	saveBtn          *widget.Button
-	saveImageBtn     *widget.Button
-	denoiseBox       fyne.CanvasObject
-	smoothBox        fyne.CanvasObject
+	backendSlider *widget.Slider
+	backendLabel  *widget.Label
+
+	previewBtn   *widget.Button
+	finalBtn     *widget.Button
+	outputPath   *widget.Entry
+	saveBtn      *widget.Button
+	saveImageBtn *widget.Button
+
 	wireframeLabel   *widget.Label
 	wireframeSlider  *widget.Slider
 	renderModeSelect *widget.RadioGroup
+	cam              scene.Camera
+	lastFinalConfig  engine.Config
+	wireframeFPS     float64
+
+	denoiseSigmaS float64
+	denoiseSigmaR float64
+
+	smoothRadius     int
+	smoothStrength   float64
+	camControlActive bool
+	denoiseEnabled   bool
+
+	smoothEnabled bool
 }
 
 func newUISession(
@@ -95,9 +99,7 @@ func newUISession(
 }
 
 func (s *uiSession) initRender() {
-	s.liveUpdate = widget.NewCheck("Live update while rendering", func(value bool) { s.service.SetLivePreview(value) })
-	s.liveUpdate.SetChecked(true)
-	s.service.SetLivePreview(true)
+	s.initLiveUpdate()
 	s.camControlCheck = widget.NewCheck(
 		"WASDQE camera control (preview)",
 		func(value bool) { s.camControlActive = value },
@@ -106,12 +108,13 @@ func (s *uiSession) initRender() {
 		sc: s.sc, service: s.service, preview: &s.runtime.preview, final: &s.runtime.final,
 		img: &s.runtime.img, imgCanvas: s.runtime.imgCanvas, status: s.runtime.status,
 		progressBar: s.runtime.progressBar, timeLabel: s.runtime.timeLabel, uiDo: s.uiDo,
-		publish: s.runtime.publishPreview, mu: s.mu, stopCh: &s.stopCh, renderTimer: &s.renderTimer,
+		mu:        s.mu,
 		lastImage: &s.lastFinalImage, lastConfig: &s.lastFinalConfig, wireframeFPS: &s.wireframeFPS,
-		liveUpdate: s.liveUpdate, denoiseEnabled: &s.denoiseEnabled, denoiseSigmaS: &s.denoiseSigmaS,
+		denoiseEnabled: &s.denoiseEnabled, denoiseSigmaS: &s.denoiseSigmaS,
 		denoiseSigmaR: &s.denoiseSigmaR, smoothEnabled: &s.smoothEnabled, smoothRadius: &s.smoothRadius,
 		smoothStrength: &s.smoothStrength,
 	}
+	s.controller.livePreview.Store(true)
 	s.startRender = s.controller.startRender
 	s.clearFinalImage = s.controller.clearFinalImage
 	s.pickableCanvas = newScenePicker(
@@ -132,6 +135,17 @@ func (s *uiSession) initRender() {
 		&s.smoothRadius,
 		&s.smoothStrength,
 	)
+}
+
+func (s *uiSession) initLiveUpdate() {
+	s.liveUpdate = widget.NewCheck("Live update while rendering", func(value bool) {
+		s.service.SetLivePreview(value)
+		if s.controller != nil {
+			s.controller.livePreview.Store(value)
+		}
+	})
+	s.liveUpdate.SetChecked(true)
+	s.service.SetLivePreview(true)
 }
 
 func (s *uiSession) initSceneControls(scenePath string) {
@@ -165,7 +179,7 @@ func (s *uiSession) initSceneObjects() {
 func (s *uiSession) initRenderSettings() {
 	settingsUI := newRenderSettingsUI(
 		s.sc, &s.runtime.preview, &s.runtime.final, &s.runtime.maxDisplayW, &s.runtime.maxDisplayH,
-		s.runtime.status, s.mu, &s.runtime.img, s.runtime.imgCanvas, &s.stopCh, &s.lastFinalImage,
+		s.runtime.status, s.mu, &s.runtime.img, s.runtime.imgCanvas, &s.lastFinalImage,
 		s.runtime.setCanvasSize, s.startRender,
 	)
 	s.settingsBox = settingsUI.box()
@@ -197,7 +211,7 @@ func (s *uiSession) initDisplayControls() {
 		s.mu.Unlock()
 		s.wireframeLabel.SetText(fmtWireframeFPS(value))
 	}
-	s.renderModeSelect = newRenderModeSelect(s.service, s.mu, &s.stopCh, s.startRender)
+	s.renderModeSelect = newRenderModeSelect(s.service, s.startRender)
 }
 
 func fmtWireframeFPS(value float64) string {

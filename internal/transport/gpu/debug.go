@@ -19,11 +19,15 @@ const (
 
 // PATHTRACER_GPU_DEBUG: 1/true/on — подробные тайминги GPU-пайплайна в лог.
 // PATHTRACER_GPU_LIVE_READBACK: 0 — не читать кадр на каждом N-м сэмпле (только финал).
-// PATHTRACER_GPU_TEMPORAL: 0 — отключить CopyImageSubData каждый сэмпл.
+// PATHTRACER_GPU_TEMPORAL: 0 — отключить temporal accumulation каждый сэмпл.
+// PATHTRACER_GPU_TILE_SIZE: размер tile-dispatch (32..512, по умолчанию 256).
+// PATHTRACER_GPU_SAMPLES_PER_PASS: бюджет лучей за один проход (1..16, по умолчанию 4).
 
 var (
-	gpuDebugOnce sync.Once
-	gpuDebugOn   atomic.Bool
+	gpuDebugOnce      sync.Once
+	gpuDebugOn        atomic.Bool
+	gpuTileSize       atomic.Int64
+	gpuSamplesPerPass atomic.Int64
 
 	livePreview atomic.Bool
 	temporalOn  atomic.Bool
@@ -32,6 +36,7 @@ var (
 	glVendor   string
 	glRenderer string
 	glVersion  string
+	glInfoMu   sync.RWMutex
 )
 
 func ensureGPUDebugConfig() {
@@ -42,6 +47,18 @@ func configureGPUDebug() {
 	livePreview.Store(readEnvBool("PATHTRACER_GPU_LIVE_READBACK", true))
 	temporalOn.Store(readEnvBool("PATHTRACER_GPU_TEMPORAL", true))
 	gpuDebugOn.Store(readEnvBool("PATHTRACER_GPU_DEBUG", false))
+	gpuTileSize.Store(int64(readIntEnv(
+		"PATHTRACER_GPU_TILE_SIZE",
+		gpuDispatchTileSizeDefault,
+		gpuDispatchTileSizeMin,
+		gpuDispatchTileSizeMax,
+	)))
+	gpuSamplesPerPass.Store(int64(readIntEnv(
+		"PATHTRACER_GPU_SAMPLES_PER_PASS",
+		gpuSamplesPerPassDefault,
+		gpuSamplesPerPassMin,
+		gpuSamplesPerPassMax,
+	)))
 	if gpuDebugOn.Load() {
 		log.Printf(
 			"[gpu] debug logging enabled (live_readback=%v temporal=%v)",
@@ -49,6 +66,16 @@ func configureGPUDebug() {
 			temporalOn.Load(),
 		)
 	}
+}
+
+func dispatchTileSize() int {
+	ensureGPUDebugConfig()
+	return int(gpuTileSize.Load()) / gpuWorkgroupSize * gpuWorkgroupSize
+}
+
+func samplesPerPass() int {
+	ensureGPUDebugConfig()
+	return int(gpuSamplesPerPass.Load())
 }
 
 func readEnvBool(name string, fallback bool) bool {
@@ -78,10 +105,10 @@ func LivePreviewEnabled() bool {
 	return livePreview.Load()
 }
 
-// TemporalEnabled — копирование кадра в prevFrameTexture каждый сэмпл.
+// TemporalEnabled включает temporal accumulation через ping-pong текстуры.
 func TemporalEnabled() bool {
 	ensureGPUDebugConfig()
-	return temporalOn.Load() && !softGL.Load()
+	return temporalOn.Load()
 }
 
 // IsSoftwareGL сообщает, что OpenGL — software (llvmpipe и т.п.): compute идёт на CPU.
@@ -91,11 +118,16 @@ func IsSoftwareGL() bool {
 
 // GLInfo возвращает строки драйвера после initGL.
 func GLInfo() (vendor, renderer, version string) {
+	glInfoMu.RLock()
+	defer glInfoMu.RUnlock()
 	return glVendor, glRenderer, glVersion
 }
 
 func setGLInfo(vendor, renderer, version string) {
+	ensureGPUDebugConfig()
+	glInfoMu.Lock()
 	glVendor, glRenderer, glVersion = vendor, renderer, version
+	glInfoMu.Unlock()
 	lower := strings.ToLower(renderer + " " + vendor)
 	soft := strings.Contains(lower, "llvmpipe") ||
 		strings.Contains(lower, "softpipe") ||
@@ -105,8 +137,10 @@ func setGLInfo(vendor, renderer, version string) {
 		strings.Contains(lower, "microsoft basic render")
 	softGL.Store(soft)
 	if soft {
-		// CopyImageSubData 1080p×N на softGL — чистый CPU.
-		temporalOn.Store(false)
+		// Compute-rendering на softGL выполняется на CPU.
+		if os.Getenv("PATHTRACER_GPU_TEMPORAL") == "" {
+			temporalOn.Store(false)
+		}
 		log.Print("[gpu] WARNING: software OpenGL detected — compute runs on CPU, discrete GPU stays idle")
 		log.Printf("[gpu]   GL_VENDOR   = %s", vendor)
 		log.Printf("[gpu]   GL_RENDERER = %s", renderer)
@@ -132,8 +166,8 @@ func gpuLogf(format string, args ...any) {
 }
 
 type gpuTimer struct {
-	name  string
 	start time.Time
+	name  string
 }
 
 func startGPUTimer(name string) gpuTimer {

@@ -1,8 +1,6 @@
 package gpu
 
 import (
-	"image"
-
 	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
 	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
@@ -20,19 +18,6 @@ type gpuSceneData struct {
 	fogBlock         [16]float32
 }
 
-func clearImageWithoutMaterials(img *image.RGBA, progress func(currentSample, totalSamples int)) {
-	for i := range img.Pix {
-		if i%gpuRGBAComponents == gpuRGBComponents {
-			img.Pix[i] = 255
-			continue
-		}
-		img.Pix[i] = 0
-	}
-	if progress != nil {
-		progress(1, 1)
-	}
-}
-
 func prepareGPUScene(sc *scene.Scene, cfg renderentity.Config) gpuSceneData {
 	return gpuSceneData{
 		matData:      packMaterials(sc.Materials),
@@ -45,6 +30,9 @@ func prepareGPUScene(sc *scene.Scene, cfg renderentity.Config) gpuSceneData {
 }
 
 func packMaterials(materials []scene.Material) []float32 {
+	if len(materials) == 0 {
+		materials = []scene.Material{{}}
+	}
 	data := make([]float32, len(materials)*gpuMaterialStride)
 	for i, material := range materials {
 		base := i * gpuMaterialStride

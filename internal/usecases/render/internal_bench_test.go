@@ -201,9 +201,8 @@ func BenchmarkInternalMaterials(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatter(
+			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterLambert(
 				rng,
-				incoming,
 				&record,
 			)
 		}
@@ -213,7 +212,7 @@ func BenchmarkInternalMaterials(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatter(
+			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterMetal(
 				rng,
 				incoming,
 				&record,
@@ -225,7 +224,7 @@ func BenchmarkInternalMaterials(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatter(
+			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterDielectric(
 				rng,
 				incoming,
 				&record,
@@ -237,11 +236,7 @@ func BenchmarkInternalMaterials(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatter(
-				rng,
-				incoming,
-				&record,
-			)
+			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterEmissive()
 		}
 	})
 	b.Run("scatter-mirror", func(b *testing.B) {
@@ -249,8 +244,7 @@ func BenchmarkInternalMaterials(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for b.Loop() {
-			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatter(
-				rng,
+			benchmarkInternalScatterOK, benchmarkInternalVec, benchmarkInternalRay = materialValue.scatterMirror(
 				incoming,
 				&record,
 			)
@@ -286,7 +280,7 @@ func BenchmarkInternalObjects(b *testing.B) {
 		}
 	})
 	b.Run("sphere.hit", func(b *testing.B) {
-		object := world[1].(sphere)
+		object := world[1].sphere
 		record := hitRecord{}
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -295,7 +289,7 @@ func BenchmarkInternalObjects(b *testing.B) {
 		}
 	})
 	b.Run("plane.hit", func(b *testing.B) {
-		object := world[0].(plane)
+		object := world[0].pln
 		record := hitRecord{}
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -304,7 +298,7 @@ func BenchmarkInternalObjects(b *testing.B) {
 		}
 	})
 	b.Run("box.hit", func(b *testing.B) {
-		object := world[2].(box)
+		object := world[2].box
 		record := hitRecord{}
 		b.ReportAllocs()
 		b.ResetTimer()

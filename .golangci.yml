@@ -99,6 +99,9 @@ linters:
           - gocognit
           - cyclop
   settings:
+    govet:
+      enable:
+        - fieldalignment
     cyclop:
       max-complexity: 10
     embeddedstructfieldcheck:

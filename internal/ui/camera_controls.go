@@ -13,24 +13,37 @@ import (
 )
 
 type cameraController struct {
-	active     *bool
-	camera     *scene.Camera
-	scene      *scene.Scene
-	service    *engine.Service
-	mu         *sync.Mutex
-	start      func(bool)
-	posX       cameraEntry
-	posY       cameraEntry
-	posZ       cameraEntry
-	lookX      cameraEntry
-	lookY      cameraEntry
-	lookZ      cameraEntry
+	posX    cameraEntry
+	posY    cameraEntry
+	posZ    cameraEntry
+	lookX   cameraEntry
+	lookY   cameraEntry
+	lookZ   cameraEntry
+	active  *bool
+	camera  *scene.Camera
+	scene   *scene.Scene
+	service *engine.Service
+	mu      *sync.Mutex
+	start   func(bool)
+
+	keys       map[fyne.KeyName]bool
+	lastKeys   map[fyne.KeyName]time.Time
+	done       chan struct{}
 	moveSpeed  float64
 	rotSpeed   float64
 	keyTimeout time.Duration
-	keys       map[fyne.KeyName]bool
-	lastKeys   map[fyne.KeyName]time.Time
-	keysMu     sync.RWMutex
+
+	keysMu sync.RWMutex
+}
+
+func startSessionCamera(w fyne.Window, s *uiSession) func() {
+	return startCameraControl(
+		w.Canvas(), &s.camControlActive, &s.cam, s.sc, s.service, s.mu, s.startRender,
+		[6]cameraEntry{
+			s.cameraEntries[0], s.cameraEntries[1], s.cameraEntries[2],
+			s.cameraEntries[3], s.cameraEntries[4], s.cameraEntries[5],
+		},
+	)
 }
 
 type cameraEntry interface {
@@ -58,7 +71,7 @@ func startCameraControl(
 	mu *sync.Mutex,
 	start func(bool),
 	entries [6]cameraEntry,
-) {
+) func() {
 	c := &cameraController{
 		active:     active,
 		camera:     camera,
@@ -77,10 +90,13 @@ func startCameraControl(
 		keyTimeout: uiKeyTimeoutMillis * time.Millisecond,
 		keys:       make(map[fyne.KeyName]bool),
 		lastKeys:   make(map[fyne.KeyName]time.Time),
+		done:       make(chan struct{}),
 	}
 	canvas.SetOnTypedKey(c.keyPressed)
 	ticker := time.NewTicker(16 * time.Millisecond)
 	go c.run(ticker)
+	var once sync.Once
+	return func() { once.Do(func() { close(c.done) }) }
 }
 
 func (c *cameraController) keyPressed(event *fyne.KeyEvent) {
@@ -95,8 +111,20 @@ func (c *cameraController) keyPressed(event *fyne.KeyEvent) {
 
 func (c *cameraController) run(ticker *time.Ticker) {
 	defer ticker.Stop()
-	for range ticker.C {
-		c.tick()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			runOnUI(func() {
+				select {
+				case <-c.done:
+					return
+				default:
+					c.tick()
+				}
+			})
+		}
 	}
 }
 

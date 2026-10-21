@@ -10,43 +10,55 @@ import (
 )
 
 type gpuUniforms struct {
-	locSpp, locSampleCount, locSeed, locSelectedObject int32
+	locSpp, locSampleCount, locSeed, locSelectedObject, locDispatchOffset int32
 }
 
 type gpuFrameState struct {
-	pixelCount, passes, updateInterval int
-	isWireframe, wantLiveReadback      bool
-	tmp                                []float32
-	uniforms                           gpuUniforms
+	tmp            []float32
+	pixelCount     int
+	passes         int
+	updateInterval int
+
+	uniforms         gpuUniforms
+	isWireframe      bool
+	wantLiveReadback bool
 }
 
 func (r *gpuRenderer) prepareGPUFrame(
 	sc *scene.Scene,
 	cfg renderentity.Config,
 	img *image.RGBA,
-	progress func(int, int),
+	hasProgress bool,
+	cancelled func() bool,
 ) (gpuFrameState, bool) {
 	pixelCount := cfg.Width * cfg.Height
 	if pixelCount <= 0 {
 		return gpuFrameState{}, false
 	}
-	pixelCount = min(pixelCount, len(img.Pix)/gpuRGBAComponents)
-	gpuLogf("begin mats=%d objs=%d", len(sc.Materials), len(sc.Objects))
-	if len(sc.Materials) == 0 {
-		clearImageWithoutMaterials(img, progress)
+	if cancelled != nil && cancelled() {
 		return gpuFrameState{}, false
 	}
+	pixelCount = min(pixelCount, len(img.Pix)/gpuRGBAComponents)
+	gpuLogf("begin mats=%d objs=%d", len(sc.Materials), len(sc.Objects))
 	sceneData := prepareGPUScene(sc, cfg)
+	r.pboPending = false
 	r.resizeGPUResources(cfg, pixelCount)
 	r.uploadGPUScene(sceneData)
 	isWireframe := GetRenderMode() == 1
+	if !isWireframe {
+		clearTexture(r.imgTexture)
+		if r.prevFrameTexture != 0 {
+			clearTexture(r.prevFrameTexture)
+		}
+	}
 	uniforms := r.configureGPUProgram(cfg, isWireframe, pixelCount)
+	wantLiveReadback := (LivePreviewEnabled() && hasProgress) || isWireframe
 	return gpuFrameState{
 		pixelCount:       pixelCount,
 		passes:           samplePasses(isWireframe, cfg.SamplesPerPx),
-		updateInterval:   sampleUpdateInterval(pixelCount),
+		updateInterval:   sampleUpdateInterval(pixelCount, wantLiveReadback),
 		isWireframe:      isWireframe,
-		wantLiveReadback: (LivePreviewEnabled() && progress != nil) || isWireframe,
+		wantLiveReadback: wantLiveReadback,
 		tmp:              r.ensureReadTmp(pixelCount),
 		uniforms:         uniforms,
 	}, true
@@ -236,20 +248,24 @@ func (r *gpuRenderer) configureGPUProgram(cfg renderentity.Config, isWireframe b
 	}
 	gl.UseProgram(program)
 	gl.BindImageTexture(0, r.imgTexture, 0, false, 0, gl.WRITE_ONLY, gl.RGBA16F)
-	if !isWireframe && r.prevFrameTexture != 0 {
-		gl.ActiveTexture(gl.TEXTURE9)
-		gl.BindTexture(gl.TEXTURE_2D, r.prevFrameTexture)
-	}
+	r.bindPreviousFrameTexture(isWireframe)
 	gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, gpuAccumBinding, r.accumSSBO)
 	if !isWireframe {
 		gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, gpuVarianceBinding, r.varianceSSBO)
 	}
 	r.cacheUniforms(program)
+	r.setPreviousFrameSampler(isWireframe)
+	temporal := int32(0)
+	if TemporalEnabled() {
+		temporal = 1
+	}
+	gl.Uniform1i(r.locs.locTemporal, temporal)
 	uniforms := gpuUniforms{
 		locSpp:            r.locs.locSpp,
 		locSampleCount:    r.locs.locSampleCount,
 		locSeed:           r.locs.locSeed,
 		locSelectedObject: r.locs.locSelectedObject,
+		locDispatchOffset: r.locs.locDispatchOffset,
 	}
 	gl.Uniform1i(r.locs.locW, glInt32(cfg.Width))
 	gl.Uniform1i(r.locs.locH, glInt32(cfg.Height))
@@ -260,10 +276,26 @@ func (r *gpuRenderer) configureGPUProgram(cfg renderentity.Config, isWireframe b
 	}
 	gl.Uniform1f(r.locs.locMaxRayDist, maxRayDist)
 	gl.Uniform1i(uniforms.locSelectedObject, glInt32(GetSelectedObject()))
+	gl.Uniform2i(uniforms.locDispatchOffset, 0, 0)
 	if !isWireframe && r.width == cfg.Width && r.height == cfg.Height {
 		clearAccumulationBuffers(r, pixelCount)
 	}
 	return uniforms
+}
+
+func (r *gpuRenderer) bindPreviousFrameTexture(isWireframe bool) {
+	if isWireframe || r.prevFrameTexture == 0 {
+		return
+	}
+	gl.ActiveTexture(gl.TEXTURE9)
+	gl.BindTexture(gl.TEXTURE_2D, r.prevFrameTexture)
+}
+
+func (r *gpuRenderer) setPreviousFrameSampler(isWireframe bool) {
+	if isWireframe || r.prevFrameTexture == 0 {
+		return
+	}
+	gl.Uniform1i(r.locs.locPrevFrame, gpuPrevFrameTextureUnit)
 }
 
 func clearAccumulationBuffers(r *gpuRenderer, pixelCount int) {

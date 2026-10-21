@@ -12,7 +12,7 @@ Clone anywhere — Go modules resolve packages from this path, not from your fil
 
 ## Requirements
 
-- Go 1.22+
+- Go 1.27.2+
 - CGO enabled (`CGO_ENABLED=1`)
 - C compiler (`gcc` / `clang`)
 - OpenGL + X11 (+ Wayland for Fyne 2.8 / GLFW 3.4) development libraries
@@ -59,8 +59,37 @@ make headless-rtx OUT=rtx.png
 ```bash
 PATHTRACER_GPU_DEBUG=1 make run-gpu
 PATHTRACER_GPU_LIVE_READBACK=0 make run-gpu   # faster preview (no mid-frame PCIe)
+PATHTRACER_GPU_TILE_SIZE=128 make run-gpu     # smaller GPU batches for Windows/TDR-safe preview
+PATHTRACER_GPU_SAMPLES_PER_PASS=2 make run-gpu # lower GPU load / higher preview responsiveness
 ```
 
 Also: `PATHTRACER_GPU_DENOISE`, `PATHTRACER_GPU_SMOOTH`, `PATHTRACER_GPU_TEMPORAL=0`.
+Live GPU readback is throttled to every few passes; use `PATHTRACER_GPU_LIVE_READBACK=0`
+when only the final frame is needed.
+Tile size is clamped to `32..512`; the default is `256`.
+Tile size is rounded down to a multiple of 32 so adjacent dispatches do not overlap.
+
+CPU and GPU share the Normal / Wireframe selection. Wireframe is a continuous,
+colored surface preview; switching to Normal stops the stream and starts a new render.
+The status displays `CPU fallback` when the selected GPU backend cannot run.
 
 **WSL note:** if logs show `llvmpipe` / `softpipe` / `SwiftShader`, the “GPU” backend is **software OpenGL on CPU** — the discrete GPU stays idle. Use a native Windows/Linux build with a real GL 4.3+ driver, or enable GPU passthrough.
+
+Software OpenGL uses the CPU renderer by default. To explicitly exercise compute
+shaders on Mesa, set `PATHTRACER_GPU_ALLOW_SOFTWARE=1` (this still runs on the CPU).
+
+## Validation
+
+```bash
+make generate fmt test test-race lint build
+go vet ./...
+go build ./...
+PATHTRACER_GPU_INTEGRATION=1 PATHTRACER_GPU_TEMPORAL=1 \
+  PATHTRACER_GPU_TILE_SIZE=33 go test ./internal/transport/gpu \
+  -run '^TestGPUIntegration$' -count=1 -v -timeout=90s
+```
+
+The OpenGL integration test requires a display and GL 4.3+. It executes the actual
+shaders, including mode changes, resizing, temporal accumulation and live/final
+readback. The other tests cover UI completion and cancellation, CPU rendering,
+and loading, saving and rendering every bundled scene.

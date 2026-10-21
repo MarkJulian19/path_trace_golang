@@ -35,6 +35,34 @@ func BenchmarkInternalGPUPostprocess(b *testing.B) {
 			tonemapHDRToRGBA(dst, tmp, pixelCount)
 		}
 	})
+	b.Run("denoise_640x360", func(b *testing.B) {
+		const width, height = 640, 360
+		dst := make([]byte, width*height*gpuRGBAComponents)
+		for i := range dst {
+			dst[i] = byte(i)
+		}
+		cfg := denoiseConfig{Enabled: true, SigmaS: 1, SigmaR: 0.15}
+		b.SetBytes(int64(len(dst)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			applyDenoise(dst, width, height, cfg)
+		}
+	})
+	b.Run("smooth_640x360", func(b *testing.B) {
+		const width, height = 640, 360
+		dst := make([]byte, width*height*gpuRGBAComponents)
+		for i := range dst {
+			dst[i] = byte(i)
+		}
+		cfg := smoothConfig{Enabled: true, Radius: 2, Strength: gpuHalf}
+		b.SetBytes(int64(len(dst)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			applySmooth(dst, width, height, cfg)
+		}
+	})
 }
 
 func BenchmarkInternalGPUConfigReads(b *testing.B) {

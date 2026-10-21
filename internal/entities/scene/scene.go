@@ -47,7 +47,7 @@ type Material struct {
 	ID   string
 	Type MaterialType
 
-	Albedo Color
+	Albedo Color   // базовый цвет материала
 	Rough  float64 // for metal and lambert (roughness), deprecated for metals (use Smoothness)
 	IOR    float64 // for dielectric
 
@@ -58,12 +58,13 @@ type Material struct {
 	// Higher values mean more absorption (darker color)
 	Absorption Color // for dielectric (default: 0,0,0 = no absorption)
 
-	// Advanced parameters for metals
+	// Advanced parameters for metals.
 	Smoothness   float64 // for metals: 0.0 = matte, 1.0 = perfect mirror (default: 1.0)
 	Reflectivity float64 // for metals: 0.0-1.0, controls reflection intensity (default: 1.0)
 
-	// Advanced parameters for dielectrics (glass)
-	Tint            Color   // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
+	// Advanced parameters for dielectrics (glass).
+	Tint Color // for dielectric: color tint for light passing through glass (default: 1,1,1 = no tint)
+
 	AbsorptionScale float64 // for dielectric: scale factor for absorption coefficient (default: 0.01, units are in cm)
 }
 
@@ -86,10 +87,9 @@ type Object struct {
 	ID   string
 	Type ObjectType
 
-	Position Vec3
-	Size     Vec3 // radius for sphere: use X, for planes/boxes: extents
-
 	MaterialID string
+	Position   Vec3
+	Size       Vec3 // radius for sphere: use X, for planes/boxes: extents
 }
 
 // RenderSettings задаёт параметры качества и производительности рендера.
@@ -102,14 +102,14 @@ type RenderSettings struct {
 }
 
 // Fog описывает туман / участвующую среду.
-// Новый объёмный туман используется только в GPU-рендере, CPU по‑прежнему игнорирует эти поля.
+// CPU и GPU используют одну модель коэффициентов и фазовой функции; GPU
+// выполняет её в шейдере, а CPU — в float64-пути с собственным worker pool.
 type Fog struct {
+	// Базовый цвет тумана/лучей.
+	Color Color // базовый цвет тумана/лучей
 	// Простой параметр плотности для обратной совместимости.
 	// Если заданы SigmaS/SigmaA, то Density рассматривается как базовая экстинкция и может быть 0.
 	Density float64 // 0 = нет тумана, >0 = базовая экстинкция
-
-	// Базовый цвет тумана/лучей.
-	Color Color // базовый цвет тумана/лучей
 
 	// Насколько сильно туман рассеивает свет в сторону камеры (0..1).
 	// При 0 — чистое поглощение, при 1 — сильные видимые лучи. Используется как множитель для SigmaS.
@@ -134,8 +134,9 @@ type Fog struct {
 	// Влияет ли туман на фон/небо. Если false, sky почти не глушится.
 	AffectSky bool
 
-	// Включение нового физически‑реалистичного объёмного тумана только для GPU.
-	// Если false, GPU может использовать упрощённую модель или полностью выключить объёмный туман.
+	// Включение физически-реалистичного объёмного тумана.
+	// На CPU и GPU используется одна семантика, но CPU сохраняет собственный
+	// многопоточный путь, а GPU — шейдерный путь.
 	GPUVolumetric bool
 }
 
@@ -149,15 +150,15 @@ type Sky struct {
 
 // Scene содержит всё необходимое для построения изображения.
 type Scene struct {
-	Name      string
-	Camera    Camera
+	Sky  *Sky // new sky system
+	Fog  *Fog // Необязательный однородный туман для GPU path tracer.
+	Name string
+
 	Objects   []Object
 	Materials []Material
-	Settings  RenderSettings
+	Camera    Camera
+
+	Settings RenderSettings
 
 	Background Color // deprecated, use Sky instead
-	Sky        *Sky  // new sky system
-
-	// Необязательный однородный туман для GPU path tracer.
-	Fog *Fog
 }

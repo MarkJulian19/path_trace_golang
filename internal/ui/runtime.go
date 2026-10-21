@@ -12,17 +12,20 @@ import (
 )
 
 type uiRuntime struct {
-	preview, final scene.RenderSettings
-	maxDisplayW    float32
-	maxDisplayH    float32
-	img            *image.RGBA
-	imgCanvas      *canvas.Image
-	mu             sync.Mutex
+	img       *image.RGBA
+	imgCanvas *canvas.Image
+
 	publishPreview func()
 	setCanvasSize  func()
 	status         *widget.Label
 	progressBar    *widget.ProgressBar
 	timeLabel      *widget.Label
+	preview        scene.RenderSettings
+	final          scene.RenderSettings
+
+	mu          sync.Mutex
+	maxDisplayW float32
+	maxDisplayH float32
 }
 
 func newUIRuntime(mode string, sc *scene.Scene, uiDo func(func())) *uiRuntime {

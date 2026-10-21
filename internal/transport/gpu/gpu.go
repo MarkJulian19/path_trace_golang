@@ -15,6 +15,7 @@ import (
 	"github.com/go-gl/gl/v3.3-core/gl"
 	"github.com/go-gl/glfw/v3.4/glfw"
 
+	domainerrors "github.com/MarkJulian19/path_trace_golang/internal/entities/errors"
 	renderentity "github.com/MarkJulian19/path_trace_golang/internal/entities/render"
 	"github.com/MarkJulian19/path_trace_golang/internal/entities/scene"
 )
@@ -22,35 +23,44 @@ import (
 var (
 	errShaderLink    = errors.New("shader link error")
 	errShaderCompile = errors.New("shader compile error")
+	errSoftwareGL    = errors.New("software OpenGL detected; GPU backend disabled")
 )
 
 const (
-	gpuDenoiseSigmaRDefault   = 0.15
-	gpuUnitValue              = 1.0
-	gpuWireframeFallback      = 0.1
-	gpuHalf                   = 0.5
-	gpuMaxSmoothRadius        = 5
-	gpuRGBAComponents         = 4
-	gpuRGBComponents          = 3
-	gpuVarianceComponents     = 9
-	gpuFloatBytes             = 4
-	gpuByteMax                = 255.0
-	gpuAnisotropyLimit        = 0.9
-	gpuFogNoiseScaleDefault   = 4.0
-	gpuFogNoiseOctavesDefault = 3
-	gpuGLMajorVersion         = 4
-	gpuGLMinorVersion         = 3
-	gpuMaterialBinding        = 3
-	gpuObjectBinding          = 4
-	gpuLightBinding           = 6
-	gpuFogBinding             = 5
-	gpuAccumBinding           = 7
-	gpuVarianceBinding        = 8
-	gpuWorkgroupSize          = 32
-	gpuWorkgroupOffset        = gpuWorkgroupSize - 1
-	gpuSampleIntervalMedium   = 3
-	gpuSampleIntervalDefault  = 5
-	gpuAbsorptionScaleDefault = 0.01
+	gpuDenoiseSigmaRDefault    = 0.15
+	gpuUnitValue               = 1.0
+	gpuWireframeFallback       = 0.1
+	gpuHalf                    = 0.5
+	gpuMaxSmoothRadius         = 5
+	gpuRGBAComponents          = 4
+	gpuRGBComponents           = 3
+	gpuVarianceComponents      = 9
+	gpuFloatBytes              = 4
+	gpuByteMax                 = 255.0
+	gpuAnisotropyLimit         = 0.9
+	gpuFogNoiseScaleDefault    = 4.0
+	gpuFogNoiseOctavesDefault  = 3
+	gpuGLMajorVersion          = 4
+	gpuGLMinorVersion          = 3
+	gpuMaterialBinding         = 3
+	gpuObjectBinding           = 4
+	gpuLightBinding            = 6
+	gpuFogBinding              = 5
+	gpuAccumBinding            = 7
+	gpuVarianceBinding         = 8
+	gpuPrevFrameTextureUnit    = 9
+	gpuWorkgroupSize           = 32
+	gpuWireframeWorkgroupSize  = 16
+	gpuDispatchTileSizeDefault = 256
+	gpuDispatchTileSizeMin     = 32
+	gpuDispatchTileSizeMax     = 512
+	gpuSamplesPerPassDefault   = 4
+	gpuSamplesPerPassMin       = 1
+	gpuSamplesPerPassMax       = 16
+	gpuSampleIntervalLive      = 4
+	gpuSampleIntervalMedium    = 3
+	gpuSampleIntervalDefault   = 5
+	gpuAbsorptionScaleDefault  = 0.01
 )
 
 // acesTonemap применяет простую аппроксимацию ACES-фильма к одному
@@ -84,13 +94,14 @@ func acesTonemap(x float32) float32 {
 
 // denoiseConfig описывает параметры пост-денойзинга для GPU-рендера.
 type denoiseConfig struct {
-	Enabled bool
 	SigmaS  float64
 	SigmaR  float64
+	Enabled bool
 }
 
 var (
 	denoiseCfgOnce  sync.Once
+	denoiseMu       sync.Mutex
 	denoiseCfg      denoiseConfig
 	denoiseOverride bool
 )
@@ -100,6 +111,8 @@ var (
 // PATHTRACER_GPU_DENOISE_SIGMA_S: пространственный радиус (по умолчанию 1.0).
 // PATHTRACER_GPU_DENOISE_SIGMA_R: радиус по цвету в sRGB (0..1), по умолчанию 0.15.
 func getDenoiseConfig() denoiseConfig {
+	denoiseMu.Lock()
+	defer denoiseMu.Unlock()
 	if denoiseOverride {
 		return denoiseCfg
 	}
@@ -120,6 +133,8 @@ func getDenoiseConfig() denoiseConfig {
 // SetDenoiseConfigFromUI позволяет UI/CLI переопределить настройки денойзинга
 // во время работы приложения, не полагаясь только на переменные окружения.
 func SetDenoiseConfigFromUI(enabled bool, sigmaS, sigmaR float64) {
+	denoiseMu.Lock()
+	defer denoiseMu.Unlock()
 	if sigmaS <= 0 {
 		sigmaS = gpuUnitValue
 	}
@@ -136,13 +151,16 @@ func SetDenoiseConfigFromUI(enabled bool, sigmaS, sigmaR float64) {
 
 // Дополнительный конфиг для более сильного сглаживания (blur) после денойза.
 type smoothConfig struct {
+	Radius   int // радиус бокса (в пикселях), 1..5
+	Strength float64
 	Enabled  bool
-	Radius   int     // радиус бокса (в пикселях), 1..5
-	Strength float64 // сила смешивания 0..1 (0 = нет эффекта, 1 = только blur)
+
+	// сила смешивания 0..1 (0 = нет эффекта, 1 = только blur)
 }
 
 var (
 	smoothCfgOnce  sync.Once
+	smoothMu       sync.Mutex
 	smoothCfg      smoothConfig
 	smoothOverride bool
 )
@@ -183,6 +201,8 @@ func IsRenderCancelled() bool {
 // PATHTRACER_GPU_SMOOTH_RADIUS: целое 1..5 (по умолчанию 2).
 // PATHTRACER_GPU_SMOOTH_STRENGTH: 0..1 (по умолчанию 0.5).
 func getSmoothConfig() smoothConfig {
+	smoothMu.Lock()
+	defer smoothMu.Unlock()
 	if smoothOverride {
 		return smoothCfg
 	}
@@ -202,6 +222,8 @@ func getSmoothConfig() smoothConfig {
 
 // SetSmoothConfigFromUI переопределяет настройки сглаживания из UI.
 func SetSmoothConfigFromUI(enabled bool, radius int, strength float64) {
+	smoothMu.Lock()
+	defer smoothMu.Unlock()
 	radius = clampInt(radius, 1, gpuMaxSmoothRadius)
 	strength = clampFloat(strength, 0, gpuUnitValue)
 	smoothCfg = smoothConfig{
@@ -301,33 +323,44 @@ type programLocs struct {
 	locSeed           int32
 	locSampleCount    int32
 	locSelectedObject int32
+	locPrevFrame      int32
+	locDispatchOffset int32
+	locTemporal       int32
 }
 
 // gpuRenderer owns a hidden GLFW window and GL resources used for compute rendering.
 type gpuRenderer struct {
-	initOnce         sync.Once
-	initErr          error
-	window           *glfw.Window
+	initErr   error
+	windowErr error
+	window    *glfw.Window
+
+	// readTmp — переиспользуемый CPU-буфер для PBO→float readback (RGBA).
+	readTmp  []float32
+	pboIndex int
+
+	width      int
+	height     int
+	pboPending bool
+
+	locs       programLocs
+	initOnce   sync.Once
+	windowOnce sync.Once
+
 	program          uint32
 	wireframeProgram uint32 // Отдельный шейдер для wireframe режима
 	imgTexture       uint32
 	prevFrameTexture uint32 // Текстура для предыдущего кадра (Temporal Accumulation)
 	pbo              uint32
 	pboBack          uint32 // Второй PBO для асинхронного чтения (двойная буферизация)
-	pboIndex         int    // Индекс текущего PBO (0 или 1)
-	matSSBO          uint32
-	objSSBO          uint32
-	lightSSBO        uint32 // SSBO для списка индексов эмиссивных объектов
-	accumSSBO        uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
-	varianceSSBO     uint32 // SSBO для variance данных (width * height * 9 * float32) - [mean, M2, count] × 3 канала
-	camUBO           uint32
-	skyUBO           uint32
-	fogUBO           uint32
-	width            int
-	height           int
-	// readTmp — переиспользуемый CPU-буфер для PBO→float readback (RGBA).
-	readTmp []float32
-	locs    programLocs
+
+	matSSBO      uint32
+	objSSBO      uint32
+	lightSSBO    uint32 // SSBO для списка индексов эмиссивных объектов
+	accumSSBO    uint32 // SSBO для накопительного буфера на GPU (width * height * 3 * float32)
+	varianceSSBO uint32 // SSBO для variance данных (width * height * 9 * float32) - [mean, M2, count] × 3 канала
+	camUBO       uint32
+	skyUBO       uint32
+	fogUBO       uint32
 }
 
 // Go-side copies of material / object type constants used in GLSL.
@@ -361,6 +394,9 @@ func (r *gpuRenderer) cacheUniforms(prog uint32) {
 		locSeed:           gl.GetUniformLocation(prog, gl.Str("uFrameSeed\x00")),
 		locSampleCount:    gl.GetUniformLocation(prog, gl.Str("uSampleCount\x00")),
 		locSelectedObject: gl.GetUniformLocation(prog, gl.Str("uSelectedObject\x00")),
+		locPrevFrame:      gl.GetUniformLocation(prog, gl.Str("prevFrameTex\x00")),
+		locDispatchOffset: gl.GetUniformLocation(prog, gl.Str("uDispatchOffset\x00")),
+		locTemporal:       gl.GetUniformLocation(prog, gl.Str("uTemporalEnabled\x00")),
 	}
 }
 
@@ -425,25 +461,15 @@ func tonemapGamma(value float32) float32 {
 	return min(float32(1), float32(math.Sqrt(float64(acesTonemap(value)))))
 }
 
-// copyFrameToPrev копирует текущий HDR-кадр в prevFrameTexture для temporal blend.
-func (r *gpuRenderer) copyFrameToPrev(w, h int) {
-	if r.prevFrameTexture == 0 || w <= 0 || h <= 0 {
-		return
-	}
-	gl.CopyImageSubData(
-		r.imgTexture, gl.TEXTURE_2D, 0, 0, 0, 0,
-		r.prevFrameTexture, gl.TEXTURE_2D, 0, 0, 0, 0,
-		glInt32(w), glInt32(h), 1,
-	)
-}
-
 // renderRequest is sent from callers to the dedicated GL worker goroutine.
 type renderRequest struct {
-	sc       *scene.Scene
-	cfg      renderentity.Config
-	img      *image.RGBA
-	progress func(currentSample, totalSamples int)
-	done     chan error
+	sc *scene.Scene
+
+	img       *image.RGBA
+	progress  func(currentSample, totalSamples int)
+	cancelled func() bool
+	done      chan error
+	cfg       renderentity.Config
 }
 
 var (
@@ -467,8 +493,12 @@ func renderWorker() {
 	defer runtime.UnlockOSThread()
 
 	err := renderer.initGL()
+	if err == nil && IsSoftwareGL() && !readEnvBool("PATHTRACER_GPU_ALLOW_SOFTWARE", false) {
+		err = errSoftwareGL
+	}
 	if err != nil {
-		// Если не удалось инициализировать GL, логируем ошибку и отвечаем ошибкой на все запросы.
+		// Если GPU недоступна или используется software GL, отвечаем ошибкой,
+		// чтобы service выбрал быстрый CPU fallback вместо медленного llvmpipe.
 		fmt.Fprintf(os.Stderr, "GPU initialization failed: %v\n", err)
 		for req := range renderCh {
 			req.done <- err
@@ -478,17 +508,19 @@ func renderWorker() {
 
 	fmt.Fprint(os.Stderr, "GPU renderer initialized successfully\n")
 	if IsSoftwareGL() {
+		_, rendererName, _ := GLInfo()
 		fmt.Fprintf(
 			os.Stderr,
 			"WARNING: %s — OpenGL compute is software (CPU). Discrete GPU will not show load.\n",
-			glRenderer,
+			rendererName,
 		)
 	}
 	gpuLogf("GL worker ready (debug=%v live_readback=%v temporal=%v softGL=%v)",
 		gpuDebugEnabled(), LivePreviewEnabled(), TemporalEnabled(), IsSoftwareGL())
 
 	for req := range renderCh {
-		err := renderer.renderOnce(req.sc, req.cfg, req.img, req.progress)
+		SetRenderCancel(false)
+		err := renderer.renderOnce(req.sc, req.cfg, req.img, req.progress, req.cancelled)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "GPU render error: %v\n", err)
 		}
@@ -516,10 +548,34 @@ func (r *gpuRenderer) initializeGL() error {
 }
 
 func (r *gpuRenderer) initGLContext() error {
+	err := r.prepareWindow()
+	if err != nil {
+		return err
+	}
+	r.window.MakeContextCurrent()
+	err = gl.Init()
+	if err != nil {
+		return fmt.Errorf("gl init: %w", err)
+	}
+	vendor := gl.GoStr(gl.GetString(gl.VENDOR))
+	rendererStr := gl.GoStr(gl.GetString(gl.RENDERER))
+	version := gl.GoStr(gl.GetString(gl.VERSION))
+	setGLInfo(vendor, rendererStr, version)
+	return nil
+}
+
+func (r *gpuRenderer) prepareWindow() error {
+	r.windowOnce.Do(func() { r.windowErr = r.createWindow() })
+	return r.windowErr
+}
+
+func (r *gpuRenderer) createWindow() error {
 	err := glfw.Init()
 	if err != nil {
 		return fmt.Errorf("glfw init: %w", err)
 	}
+	glfw.DefaultWindowHints()
+	defer glfw.DefaultWindowHints()
 
 	glfw.WindowHint(glfw.Visible, glfw.False)
 	glfw.WindowHint(glfw.ContextVersionMajor, gpuGLMajorVersion)
@@ -531,17 +587,6 @@ func (r *gpuRenderer) initGLContext() error {
 		return fmt.Errorf("glfw create window: %w", err)
 	}
 	r.window = w
-	w.MakeContextCurrent()
-
-	err = gl.Init()
-	if err != nil {
-		return fmt.Errorf("gl init: %w", err)
-	}
-
-	vendor := gl.GoStr(gl.GetString(gl.VENDOR))
-	rendererStr := gl.GoStr(gl.GetString(gl.RENDERER))
-	version := gl.GoStr(gl.GetString(gl.VERSION))
-	setGLInfo(vendor, rendererStr, version)
 	return nil
 }
 
@@ -577,7 +622,6 @@ func (r *gpuRenderer) initGLPrograms() error {
 		return err
 	}
 	r.program = program
-
 	program, err = createComputeProgram(wireframeShaderSource, "wireframe")
 	if err != nil {
 		return err
@@ -635,23 +679,43 @@ func (r *gpuRenderer) renderOnce(
 	cfg renderentity.Config,
 	img *image.RGBA,
 	progress func(currentSample, totalSamples int),
+	cancelled func() bool,
 ) error {
 	totalT := startGPUTimer("renderOnce")
 	defer totalT.stopf("%dx%d spp=%d live=%v", cfg.Width, cfg.Height, cfg.SamplesPerPx, LivePreviewEnabled())
 
-	state, ok := r.prepareGPUFrame(sc, cfg, img, progress)
+	if cancelled != nil && cancelled() {
+		SetRenderCancel(true)
+		return nil
+	}
+	state, ok := r.prepareGPUFrame(sc, cfg, img, progress != nil, cancelled)
 	if !ok {
 		return nil
 	}
-	r.renderSamplesAndReadback(state, cfg, img, progress)
-
-	applyPostprocess(img, cfg)
-
-	if progress != nil {
-		progress(cfg.SamplesPerPx, cfg.SamplesPerPx)
+	if !r.renderSamplesAndReadback(state, cfg, img, progress, cancelled) {
+		return nil
+	}
+	if code := gl.GetError(); code != gl.NO_ERROR {
+		return fmt.Errorf("%w: code=0x%x", domainerrors.ErrGPUOperation, code)
 	}
 
+	finishGPUFrame(state, cfg, img, progress, cancelled)
 	return nil
+}
+
+func finishGPUFrame(
+	state gpuFrameState, cfg renderentity.Config, img *image.RGBA,
+	progress func(int, int), cancelled func() bool,
+) {
+	if cancelled != nil && cancelled() {
+		return
+	}
+	if !state.isWireframe {
+		applyPostprocess(img, cfg)
+	}
+	if progress != nil && (cancelled == nil || !cancelled()) {
+		progress(cfg.SamplesPerPx, cfg.SamplesPerPx)
+	}
 }
 
 func (r *gpuRenderer) renderSamplesAndReadback(
@@ -659,44 +723,44 @@ func (r *gpuRenderer) renderSamplesAndReadback(
 	cfg renderentity.Config,
 	img *image.RGBA,
 	progress func(int, int),
-) {
+	cancelled func() bool,
+) bool {
 	gpuLogf(
-		"sample loop passes=%d updateInterval=%d live_readback=%v",
+		"sample loop passes=%d updateInterval=%d tile=%d live_readback=%v",
 		state.passes,
 		state.updateInterval,
+		dispatchTileSize(),
 		state.wantLiveReadback,
 	)
-	stats := r.renderSamples(gpuSampleRequest{
-		cfg:              configForSamples{width: cfg.Width, height: cfg.Height},
-		img:              img,
-		tmp:              state.tmp,
-		pixelCount:       state.pixelCount,
-		passes:           state.passes,
-		updateInterval:   state.updateInterval,
-		isWireframe:      state.isWireframe,
-		wantLiveReadback: state.wantLiveReadback,
-		locSpp:           state.uniforms.locSpp,
-		locSampleCount:   state.uniforms.locSampleCount,
-		locSeed:          state.uniforms.locSeed,
-		locObject:        state.uniforms.locSelectedObject,
-		progress:         progress,
-	})
+	stats := r.renderSamples(newGPUSampleRequest(state, cfg, img, progress, cancelled))
 	if gpuDebugEnabled() {
 		gpuLogf("dispatch_total=%s readbacks=%d readback_total=%s",
 			stats.dispatchTime.Round(time.Microsecond), stats.readbacks, stats.readbackTime.Round(time.Microsecond))
 	}
+	if stats.cancelled {
+		return false
+	}
 	if needsFinalReadback(state.isWireframe, state.wantLiveReadback, stats.lastReadback) {
 		r.readFinalFrame(img, state.pixelCount)
-		return
+		return true
 	}
 	gpuLogf("skip duplicate final_readback (already have last sample)")
+	return true
 }
 
 type fogBlockValues struct {
-	density, scatter, affectSky, gpuVolumetric float32
-	color                                      [4]float32
-	sigmaS, sigmaA, anisotropy, heteroStrength float32
-	noiseScale, noiseOctaves                   float32
+	color         [4]float32
+	density       float32
+	scatter       float32
+	affectSky     float32
+	gpuVolumetric float32
+
+	sigmaS         float32
+	sigmaA         float32
+	anisotropy     float32
+	heteroStrength float32
+	noiseScale     float32
+	noiseOctaves   float32
 }
 
 func packFogBlock(sc *scene.Scene) [16]float32 {
@@ -721,23 +785,52 @@ func packFogBlock(sc *scene.Scene) [16]float32 {
 func applyDenoise(dst []byte, width, height int, cfg denoiseConfig) {
 	timer := startGPUTimer("cpu_denoise")
 	smoothed := make([]byte, len(dst))
-	for y := range height {
-		for x := range width {
-			writeDenoisedPixel(smoothed, dst, width, height, x, y, cfg)
+	kernel := newDenoiseKernel(cfg)
+	parallelRows(height, func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := range width {
+				writeDenoisedPixel(smoothed, dst, width, height, x, y, kernel)
+			}
 		}
-	}
+	})
 	copy(dst, smoothed)
 	timer.stop()
 }
 
-func writeDenoisedPixel(dst, src []byte, width, height, x, y int, cfg denoiseConfig) {
+type denoiseKernel struct {
+	spatialWeight [9]float64
+	twoSigmaR2    float64
+}
+
+type smoothIntegralBuffer struct {
+	data []uint32
+}
+
+var smoothIntegralPool sync.Pool
+
+func newDenoiseKernel(cfg denoiseConfig) denoiseKernel {
+	kernel := denoiseKernel{
+		twoSigmaR2: 2 * cfg.SigmaR * cfg.SigmaR,
+	}
+	twoSigmaS2 := 2 * cfg.SigmaS * cfg.SigmaS
+	weightIndex := 0
+	for ky := -1; ky <= 1; ky++ {
+		for kx := -1; kx <= 1; kx++ {
+			kernel.spatialWeight[weightIndex] = math.Exp(-float64(kx*kx+ky*ky) / twoSigmaS2)
+			weightIndex++
+		}
+	}
+	return kernel
+}
+
+func writeDenoisedPixel(dst, src []byte, width, height, x, y int, kernel denoiseKernel) {
 	centerIndex := (y*width + x) * gpuRGBAComponents
 	center := [3]float64{
 		float64(src[centerIndex]) / gpuByteMax,
 		float64(src[centerIndex+1]) / gpuByteMax,
 		float64(src[centerIndex+2]) / gpuByteMax,
 	}
-	sumR, sumG, sumB, sumWeight := denoiseNeighborhood(src, width, height, x, y, center, cfg)
+	sumR, sumG, sumB, sumWeight := denoiseNeighborhood(src, width, height, x, y, center, kernel)
 	if sumWeight <= 0 {
 		copy(dst[centerIndex:centerIndex+gpuRGBAComponents], src[centerIndex:centerIndex+gpuRGBAComponents])
 		return
@@ -752,13 +845,12 @@ func denoiseNeighborhood(
 	src []byte,
 	width, height, x, y int,
 	center [3]float64,
-	cfg denoiseConfig,
+	kernel denoiseKernel,
 ) (float64, float64, float64, float64) {
 	var sumR, sumG, sumB, sumWeight float64
-	twoSigmaS2 := 2 * cfg.SigmaS * cfg.SigmaS
-	twoSigmaR2 := 2 * cfg.SigmaR * cfg.SigmaR
 	for ky := -1; ky <= 1; ky++ {
 		for kx := -1; kx <= 1; kx++ {
+			weightIndex := (ky+1)*3 + kx + 1
 			nx, ny := x+kx, y+ky
 			if nx < 0 || nx >= width || ny < 0 || ny >= height {
 				continue
@@ -769,8 +861,8 @@ func denoiseNeighborhood(
 			nb := float64(src[index+2]) / gpuByteMax
 			dr, dg, db := center[0]-nr, center[1]-ng, center[2]-nb
 			distanceColor := dr*dr + dg*dg + db*db
-			spatialWeight := math.Exp(-float64(kx*kx+ky*ky) / twoSigmaS2)
-			colorWeight := math.Exp(-distanceColor / twoSigmaR2)
+			spatialWeight := kernel.spatialWeight[weightIndex]
+			colorWeight := math.Exp(-distanceColor / kernel.twoSigmaR2)
 			weight := spatialWeight * colorWeight
 			sumWeight += weight
 			sumR += nr * weight
@@ -786,13 +878,52 @@ func applySmooth(dst []byte, width, height int, cfg smoothConfig) {
 	radius := min(max(cfg.Radius, 1), gpuMaxSmoothRadius)
 	strength := clampFloat(cfg.Strength, 0, 1)
 	blurred := make([]byte, len(dst))
-	for y := range height {
-		for x := range width {
-			writeSmoothedPixel(blurred, dst, width, height, x, y, radius, strength)
-		}
+	if radius >= 2 && width*height >= 1024 {
+		integralSize := (width + 1) * (height + 1) * gpuRGBComponents
+		integral := acquireSmoothIntegral(integralSize)
+		buildSmoothIntegral(integral.data, dst, width, height)
+		parallelRows(height, func(y0, y1 int) {
+			for y := y0; y < y1; y++ {
+				for x := range width {
+					writeSmoothedPixelIntegral(blurred, dst, width, height, x, y, radius, strength, integral.data)
+				}
+			}
+		})
+		releaseSmoothIntegral(integral)
+	} else {
+		parallelRows(height, func(y0, y1 int) {
+			for y := y0; y < y1; y++ {
+				for x := range width {
+					writeSmoothedPixel(blurred, dst, width, height, x, y, radius, strength)
+				}
+			}
+		})
 	}
 	copy(dst, blurred)
 	timer.stop()
+}
+
+// parallelRows splits independent image rows across available CPUs. Each worker
+// writes a disjoint range of the destination, so the pixel math stays unchanged.
+func parallelRows(height int, fn func(y0, y1 int)) {
+	if height <= 1 {
+		fn(0, height)
+		return
+	}
+	workers := min(runtime.GOMAXPROCS(0), height)
+	if workers < 2 || height < 64 {
+		fn(0, height)
+		return
+	}
+	rowsPerWorker := (height + workers - 1) / workers
+	var wg sync.WaitGroup
+	for y0 := 0; y0 < height; y0 += rowsPerWorker {
+		y1 := min(y0+rowsPerWorker, height)
+		wg.Go(func() {
+			fn(y0, y1)
+		})
+	}
+	wg.Wait()
 }
 
 func writeSmoothedPixel(dst, src []byte, width, height, x, y, radius int, strength float64) {
@@ -801,11 +932,68 @@ func writeSmoothedPixel(dst, src []byte, width, height, x, y, radius int, streng
 		return
 	}
 	index := (y*width + x) * gpuRGBAComponents
+	writeSmoothedPixelValues(dst, src, index, avgR, avgG, avgB, count, strength)
+}
+
+func writeSmoothedPixelValues(dst, src []byte, index int, sumR, sumG, sumB, count, strength float64) {
 	origR, origG, origB := float64(src[index]), float64(src[index+1]), float64(src[index+2])
-	dst[index] = byte(clampFloat((1-strength)*origR+strength*avgR/count, 0, gpuByteMax) + gpuHalf)
-	dst[index+1] = byte(clampFloat((1-strength)*origG+strength*avgG/count, 0, gpuByteMax) + gpuHalf)
-	dst[index+2] = byte(clampFloat((1-strength)*origB+strength*avgB/count, 0, gpuByteMax) + gpuHalf)
+	dst[index] = byte(clampFloat((1-strength)*origR+strength*sumR/count, 0, gpuByteMax) + gpuHalf)
+	dst[index+1] = byte(clampFloat((1-strength)*origG+strength*sumG/count, 0, gpuByteMax) + gpuHalf)
+	dst[index+2] = byte(clampFloat((1-strength)*origB+strength*sumB/count, 0, gpuByteMax) + gpuHalf)
 	dst[index+3] = 255
+}
+
+func writeSmoothedPixelIntegral(dst, src []byte, width, height, x, y, radius int, strength float64, integral []uint32) {
+	x0 := max(x-radius, 0)
+	x1 := min(x+radius+1, width)
+	y0 := max(y-radius, 0)
+	y1 := min(y+radius+1, height)
+	stride := width + 1
+	topLeft := ((y0 * stride) + x0) * gpuRGBComponents
+	topRight := ((y0 * stride) + x1) * gpuRGBComponents
+	bottomLeft := ((y1 * stride) + x0) * gpuRGBComponents
+	bottomRight := ((y1 * stride) + x1) * gpuRGBComponents
+	sumR := float64(integral[bottomRight] - integral[topRight] - integral[bottomLeft] + integral[topLeft])
+	sumG := float64(integral[bottomRight+1] - integral[topRight+1] - integral[bottomLeft+1] + integral[topLeft+1])
+	sumB := float64(integral[bottomRight+2] - integral[topRight+2] - integral[bottomLeft+2] + integral[topLeft+2])
+	count := float64((x1 - x0) * (y1 - y0))
+	index := (y*width + x) * gpuRGBAComponents
+	writeSmoothedPixelValues(dst, src, index, sumR, sumG, sumB, count, strength)
+}
+
+func acquireSmoothIntegral(size int) *smoothIntegralBuffer {
+	cached, _ := smoothIntegralPool.Get().(*smoothIntegralBuffer)
+	if cached == nil || cap(cached.data) < size {
+		return &smoothIntegralBuffer{data: make([]uint32, size)}
+	}
+	cached.data = cached.data[:size]
+	return cached
+}
+
+func releaseSmoothIntegral(integral *smoothIntegralBuffer) {
+	integral.data = integral.data[:0]
+	smoothIntegralPool.Put(integral)
+}
+
+func buildSmoothIntegral(integral []uint32, src []byte, width, height int) {
+	stride := width + 1
+	clear(integral[:stride*gpuRGBComponents])
+	for y := range height {
+		rowStart := ((y + 1) * stride) * gpuRGBComponents
+		clear(integral[rowStart : rowStart+gpuRGBComponents])
+		rowSumR, rowSumG, rowSumB := uint32(0), uint32(0), uint32(0)
+		for x := range width {
+			index := (y*width + x) * gpuRGBAComponents
+			rowSumR += uint32(src[index])
+			rowSumG += uint32(src[index+1])
+			rowSumB += uint32(src[index+2])
+			current := (((y + 1) * stride) + x + 1) * gpuRGBComponents
+			above := (y*stride + x + 1) * gpuRGBComponents
+			integral[current] = integral[above] + rowSumR
+			integral[current+1] = integral[above+1] + rowSumG
+			integral[current+2] = integral[above+2] + rowSumB
+		}
+	}
 }
 
 func smoothNeighborhood(src []byte, width, height, x, y, radius int) (float64, float64, float64, float64) {
@@ -871,7 +1059,10 @@ func setFogNoise(values *fogBlockValues, fog *scene.Fog) {
 	}
 }
 
-func sampleUpdateInterval(pixelCount int) int {
+func sampleUpdateInterval(pixelCount int, livePreview bool) int {
+	if livePreview {
+		return gpuSampleIntervalLive
+	}
 	switch {
 	case pixelCount > 2000*2000:
 		return 1
@@ -884,19 +1075,38 @@ func sampleUpdateInterval(pixelCount int) int {
 	}
 }
 
-// Render is the public entry point that schedules a GPU render on the
-// dedicated GL worker and waits for completion.
-// For now it just draws a test gradient using a compute shader to verify GPU path.
-// Later this can be replaced with a full path tracer that uses sc and cfg.
+// Render выполняет рендер сцены в выделенном потоке OpenGL и ждёт завершения.
 func Render(sc *scene.Scene, cfg renderentity.Config, img *image.RGBA, progress renderentity.Progress) error {
+	return RenderWithCancel(sc, cfg, img, progress, nil)
+}
+
+// Initialize создаёт скрытое окно в главном потоке. Контекст привязывается
+// к выделенному потоку непосредственно перед выполнением команд OpenGL.
+func Initialize() error {
+	return renderer.prepareWindow()
+}
+
+// RenderWithCancel выполняет GPU-рендер с отменой перед подготовкой и между плитками изображения.
+func RenderWithCancel(
+	sc *scene.Scene,
+	cfg renderentity.Config,
+	img *image.RGBA,
+	progress renderentity.Progress,
+	cancelled func() bool,
+) error {
+	err := Initialize()
+	if err != nil {
+		return fmt.Errorf("prepare GPU window: %w", err)
+	}
 	ensureWorker()
 	done := make(chan error, 1)
 	req := renderRequest{
-		sc:       sc,
-		cfg:      cfg,
-		img:      img,
-		progress: progress,
-		done:     done,
+		sc:        sc,
+		cfg:       cfg,
+		img:       img,
+		progress:  progress,
+		cancelled: cancelled,
+		done:      done,
 	}
 	renderCh <- req
 	return <-done

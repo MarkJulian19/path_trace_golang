@@ -148,9 +148,12 @@ func renderScene(renderer *Service, sc *scene.Scene, settings scene.RenderSettin
 
 // VideoEncodingConfig holds configuration for video encoding.
 type VideoEncodingConfig struct {
-	Bitrate     int    // Video bitrate in kbps (default: 2000)
-	Quality     int    // JPEG quality 1-100, higher is better (default: 90)
-	PixelFormat string // Pixel format: "yuv420p", "yuv444p" (default: "yuv420p")
+	// Video bitrate in kbps (default: 2000)
+	// JPEG quality 1-100, higher is better (default: 90)
+	PixelFormat string
+	Bitrate     int
+	Quality     int
+	// Pixel format: "yuv420p", "yuv444p" (default: "yuv420p")
 }
 
 // DefaultVideoEncodingConfig returns default encoding configuration.
@@ -276,8 +279,8 @@ func encodeFrameToJPEG(img image.Image, quality int) ([]byte, error) {
 }
 
 type aviWriter struct {
-	file *os.File
 	err  error
+	file *os.File
 }
 
 func (w *aviWriter) string(value string) {

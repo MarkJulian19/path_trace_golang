@@ -50,6 +50,80 @@ func (mr *MockGPUBackendMockRecorder) Render(value, config, target, progress int
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Render", reflect.TypeOf((*MockGPUBackend)(nil).Render), value, config, target, progress)
 }
 
+// MockGPUInitializer is a mock of GPUInitializer interface.
+type MockGPUInitializer struct {
+	ctrl     *gomock.Controller
+	recorder *MockGPUInitializerMockRecorder
+}
+
+// MockGPUInitializerMockRecorder is the mock recorder for MockGPUInitializer.
+type MockGPUInitializerMockRecorder struct {
+	mock *MockGPUInitializer
+}
+
+// NewMockGPUInitializer creates a new mock instance.
+func NewMockGPUInitializer(ctrl *gomock.Controller) *MockGPUInitializer {
+	mock := &MockGPUInitializer{ctrl: ctrl}
+	mock.recorder = &MockGPUInitializerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockGPUInitializer) EXPECT() *MockGPUInitializerMockRecorder {
+	return m.recorder
+}
+
+// Initialize mocks base method.
+func (m *MockGPUInitializer) Initialize() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Initialize")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Initialize indicates an expected call of Initialize.
+func (mr *MockGPUInitializerMockRecorder) Initialize() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Initialize", reflect.TypeOf((*MockGPUInitializer)(nil).Initialize))
+}
+
+// MockGPUBackendCancelable is a mock of GPUBackendCancelable interface.
+type MockGPUBackendCancelable struct {
+	ctrl     *gomock.Controller
+	recorder *MockGPUBackendCancelableMockRecorder
+}
+
+// MockGPUBackendCancelableMockRecorder is the mock recorder for MockGPUBackendCancelable.
+type MockGPUBackendCancelableMockRecorder struct {
+	mock *MockGPUBackendCancelable
+}
+
+// NewMockGPUBackendCancelable creates a new mock instance.
+func NewMockGPUBackendCancelable(ctrl *gomock.Controller) *MockGPUBackendCancelable {
+	mock := &MockGPUBackendCancelable{ctrl: ctrl}
+	mock.recorder = &MockGPUBackendCancelableMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockGPUBackendCancelable) EXPECT() *MockGPUBackendCancelableMockRecorder {
+	return m.recorder
+}
+
+// RenderWithCancel mocks base method.
+func (m *MockGPUBackendCancelable) RenderWithCancel(value *scene.Scene, config render.Config, target *image.RGBA, progress render.Progress, cancelled func() bool) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RenderWithCancel", value, config, target, progress, cancelled)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RenderWithCancel indicates an expected call of RenderWithCancel.
+func (mr *MockGPUBackendCancelableMockRecorder) RenderWithCancel(value, config, target, progress, cancelled interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RenderWithCancel", reflect.TypeOf((*MockGPUBackendCancelable)(nil).RenderWithCancel), value, config, target, progress, cancelled)
+}
+
 // MockGPUControls is a mock of GPUControls interface.
 type MockGPUControls struct {
 	ctrl     *gomock.Controller

@@ -17,8 +17,8 @@ import (
 )
 
 type videoUI struct {
-	sc          *scene.Scene
-	cam         scene.Camera
+	sc *scene.Scene
+
 	settings    *scene.RenderSettings
 	service     *engine.Service
 	uiDo        func(func())
@@ -28,6 +28,7 @@ type videoUI struct {
 	mu          *sync.Mutex
 	img         **image.RGBA
 	canvas      *canvas.Image
+	cam         scene.Camera
 }
 
 func newVideoBox(
@@ -176,10 +177,15 @@ func (v *videoUI) render(startCam, endCam scene.Camera, duration float64, fps in
 		MaxDepth:     v.settings.MaxDepth,
 		MaxRayDist:   float32(v.settings.MaxRayDist),
 	}
-	go v.renderJob(startCam, endCam, duration, fps, outputPath, cfg)
+	if v.service.GetBackend() == engine.BackendGPU {
+		v.service.PrepareGPU()
+	}
+	snapshot := cloneScene(v.sc)
+	go v.renderJob(&snapshot, startCam, endCam, duration, fps, outputPath, cfg)
 }
 
 func (v *videoUI) renderJob(
+	sc *scene.Scene,
 	startCam, endCam scene.Camera,
 	duration float64,
 	fps int,
@@ -199,7 +205,7 @@ func (v *videoUI) renderJob(
 			frameImg,
 		)
 	}
-	frames, err := v.service.VideoSequence(v.sc, startCam, endCam, duration, fps, cfg, progress)
+	frames, err := v.service.VideoSequence(sc, startCam, endCam, duration, fps, cfg, progress)
 	if err != nil {
 		v.uiDo(func() { v.status.SetText(fmt.Sprintf("Video render error: %v", err)) })
 		return
@@ -252,9 +258,7 @@ func (v *videoUI) updateVideoPreview(
 	}
 	v.mu.Lock()
 	bounds := frameImg.Bounds()
-	if (*previewImg).Bounds().Dx() != bounds.Dx() || (*previewImg).Bounds().Dy() != bounds.Dy() {
-		*previewImg = image.NewRGBA(bounds)
-	}
+	*previewImg = image.NewRGBA(bounds)
 	copyImage((*previewImg), frameImg)
 	snapshot := *previewImg
 	v.mu.Unlock()

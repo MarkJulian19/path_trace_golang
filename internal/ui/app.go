@@ -59,23 +59,13 @@ func Run(scenePath, mode string, scenes *scenecase.Scene, renderService *engine.
 	// Автоматический предпросмотр при старте, чтобы сразу было видно картинку.
 	go session.startRender(false)
 
-	startCameraControl(
-		w.Canvas(),
-		&session.camControlActive,
-		&session.cam,
-		sc,
-		renderService,
-		session.mu,
-		session.startRender,
-		[6]cameraEntry{
-			session.cameraEntries[0],
-			session.cameraEntries[1],
-			session.cameraEntries[2],
-			session.cameraEntries[3],
-			session.cameraEntries[4],
-			session.cameraEntries[5],
-		},
-	)
+	stopCamera := startSessionCamera(w, session)
+	defer stopCamera()
+	defer session.controller.stop()
+	w.SetOnClosed(func() {
+		stopCamera()
+		session.controller.stop()
+	})
 
 	w.ShowAndRun()
 	return nil

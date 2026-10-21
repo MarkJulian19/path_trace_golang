@@ -10,6 +10,11 @@ import (
 // Adapter предоставляет GPU-рендер и его настройки через порты сценария.
 type Adapter struct{}
 
+// Initialize создаёт скрытое окно OpenGL в главном потоке приложения.
+func (Adapter) Initialize() error {
+	return Initialize()
+}
+
 // Render строит изображение на GPU.
 func (Adapter) Render(
 	value *scene.Scene,
@@ -18,6 +23,17 @@ func (Adapter) Render(
 	progress renderentity.Progress,
 ) error {
 	return Render(value, config, img, progress)
+}
+
+// RenderWithCancel строит GPU-кадр с отменой между dispatch tiles.
+func (Adapter) RenderWithCancel(
+	value *scene.Scene,
+	config renderentity.Config,
+	img *image.RGBA,
+	progress renderentity.Progress,
+	cancelled func() bool,
+) error {
+	return RenderWithCancel(value, config, img, progress, cancelled)
 }
 
 // SetSelectedObjectFromUI выбирает объект для подсветки.

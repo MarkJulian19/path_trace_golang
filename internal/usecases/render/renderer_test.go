@@ -157,6 +157,32 @@ func TestIntoReportsProgressAndRejectsWrongBuffer(t *testing.T) {
 	}
 }
 
+func TestServiceCPUWireframeRendersAndCompletes(t *testing.T) {
+	t.Parallel()
+
+	service := render.New(nil, nil)
+	service.SetCPURenderMode(1)
+	cfg := testConfig()
+	img := image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
+	var completed atomic.Bool
+
+	service.Into(benchmarkScene(), cfg, img, func(currentSample, totalSamples int) {
+		if currentSample == totalSamples {
+			completed.Store(true)
+		}
+	})
+
+	if !completed.Load() {
+		t.Fatal("CPU wireframe did not report completion")
+	}
+	for index := 0; index < len(img.Pix); index += 4 {
+		if img.Pix[index] != 0 || img.Pix[index+1] != 0 || img.Pix[index+2] != 0 {
+			return
+		}
+	}
+	t.Fatal("CPU wireframe produced an empty frame")
+}
+
 func TestPickObjectReturnsNearestObjectAndHandlesEmptyScene(t *testing.T) {
 	t.Parallel()
 	config := render.Config{

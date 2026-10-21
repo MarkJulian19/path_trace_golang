@@ -328,15 +328,10 @@ var (
 	benchmarkBackend      render.Backend
 	benchmarkMode         int
 	benchmarkControlState struct {
-		selectedObject int
-		livePreview    bool
-		renderMode     int
-		renderCancel   bool
-		denoiseEnabled bool
-		sigmaS         float64
-		sigmaR         float64
-		smoothEnabled  bool
-		smoothRadius   int
-		smoothStrength float64
+		sigmaS, sigmaR, smoothStrength float64
+		selectedObject, renderMode     int
+		smoothRadius                   int
+		livePreview, renderCancel      bool
+		denoiseEnabled, smoothEnabled  bool
 	}
 )

@@ -18,8 +18,9 @@ type Service struct {
 	backendMu sync.RWMutex
 	backend   Backend
 
-	cpuModeMu sync.RWMutex
-	cpuMode   int
+	cpuModeMu       sync.RWMutex
+	cpuMode         int
+	fallbackWarning sync.Once
 }
 
 // New создаёт сценарий рендера с необязательным GPU-адаптером.
@@ -50,6 +51,19 @@ func (s *Service) GetBackend() Backend {
 	return s.backend
 }
 
+// PrepareGPU создаёт оконные ресурсы в главном потоке до фонового рендера.
+// Ошибку повторно возвращает сам GPU-адаптер при построении кадра.
+func (s *Service) PrepareGPU() {
+	initializer, ok := s.gpuBackend.(GPUInitializer)
+	if !ok {
+		return
+	}
+	err := initializer.Initialize()
+	if err != nil {
+		s.warnGPUFallback(err)
+	}
+}
+
 // Render строит изображение сцены и возвращает новый буфер изображения.
 func (s *Service) Render(sc *scene.Scene, cfg renderentity.Config) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, cfg.Width, cfg.Height))
@@ -64,12 +78,24 @@ func (s *Service) Into(
 	img *image.RGBA,
 	progress renderentity.Progress,
 ) {
+	s.IntoWithCancel(sc, cfg, img, progress, nil)
+}
+
+// IntoWithCancel строит сцену и позволяет интерактивному клиенту отменить
+// текущий CPU/GPU job до запуска следующего.
+func (s *Service) IntoWithCancel(
+	sc *scene.Scene,
+	cfg renderentity.Config,
+	img *image.RGBA,
+	progress renderentity.Progress,
+	cancelled func() bool,
+) Backend {
 	if s.GetBackend() == BackendGPU {
-		s.renderIntoGPU(sc, cfg, img, progress)
-		return
+		return s.renderIntoGPU(sc, cfg, img, progress, cancelled)
 	}
 
-	renderIntoCPU(sc, cfg, img, progress, s.GetCPURenderMode())
+	renderIntoCPUWithCancel(sc, cfg, img, progress, s.GetCPURenderMode(), cancelled)
+	return BackendCPU
 }
 
 // Scene строит изображение сцены по настройкам качества.
@@ -156,17 +182,31 @@ func (s *Service) renderIntoGPU(
 	cfg renderentity.Config,
 	img *image.RGBA,
 	progress renderentity.Progress,
-) {
+	cancelled func() bool,
+) Backend {
 	if s.gpuBackend == nil {
-		renderIntoCPU(sc, cfg, img, progress, s.GetCPURenderMode())
-		return
+		renderIntoCPUWithCancel(sc, cfg, img, progress, s.GetCPURenderMode(), cancelled)
+		return BackendCPU
 	}
 
-	err := s.gpuBackend.Render(sc, cfg, img, progress)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "GPU render error: %v\nFalling back to CPU renderer.\n", err)
-		renderIntoCPU(sc, cfg, img, progress, s.GetCPURenderMode())
+	var err error
+	if backend, ok := s.gpuBackend.(GPUBackendCancelable); ok {
+		err = backend.RenderWithCancel(sc, cfg, img, progress, cancelled)
+	} else {
+		err = s.gpuBackend.Render(sc, cfg, img, progress)
 	}
+	if err != nil {
+		s.warnGPUFallback(err)
+		renderIntoCPUWithCancel(sc, cfg, img, progress, s.GetCPURenderMode(), cancelled)
+		return BackendCPU
+	}
+	return BackendGPU
+}
+
+func (s *Service) warnGPUFallback(err error) {
+	s.fallbackWarning.Do(func() {
+		fmt.Fprintf(os.Stderr, "GPU render error: %v\nFalling back to CPU renderer.\n", err)
+	})
 }
 
 func clampRenderMode(mode int) int {

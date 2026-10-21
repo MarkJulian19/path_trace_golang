@@ -7,6 +7,9 @@ const (
 	renderUnitValue              = 1.0
 	renderRoughnessThreshold     = 1e-6
 	renderRoughnessScale         = 0.1
+	renderMetalRoughThreshold    = 1e-4
+	renderThroughputCutoff       = 0.01
+	renderDefaultIOR             = 1.5
 	renderScatterLengthThreshold = 1e-8
 	renderReflectanceExponent    = 5
 	renderRandomShiftA           = 13
@@ -16,7 +19,7 @@ const (
 	renderRandomMantissaScale    = 9007199254740992.0
 	renderRGBAComponents         = 4
 	renderMaxWorkers             = 128
-	renderColorMax               = 255.999
+	renderColorMax               = 255.0
 	renderEdgeThreshold          = 0.95
 	renderGrayWireframe          = 0.8
 	renderMinRayDistance         = 0.001

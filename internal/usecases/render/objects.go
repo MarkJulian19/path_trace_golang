@@ -7,11 +7,12 @@ import (
 )
 
 type hitRecord struct {
+	mat       *material
 	p         vec3
 	normal    vec3
 	t         float64
+	objectIdx int
 	frontFace bool
-	mat       material
 }
 
 func (h *hitRecord) setFaceNormal(r ray, outwardNormal vec3) {
@@ -23,18 +24,42 @@ func (h *hitRecord) setFaceNormal(r ray, outwardNormal vec3) {
 	}
 }
 
-type hittable interface {
-	hit(r ray, tMin, tMax float64, rec *hitRecord) bool
+type hittableKind uint8
+
+const (
+	hittableSphere hittableKind = iota
+	hittablePlane
+	hittableBox
+)
+
+type hittable struct {
+	box       box
+	sphere    sphere
+	pln       plane
+	objectIdx int
+	sceneIdx  int
+	kind      hittableKind
+}
+
+func (h *hittable) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
+	switch h.kind {
+	case hittableSphere:
+		return h.sphere.hit(r, tMin, tMax, rec)
+	case hittablePlane:
+		return h.pln.hit(r, tMin, tMax, rec)
+	default:
+		return h.box.hit(r, tMin, tMax, rec)
+	}
 }
 
 // Sphere primitive.
 type sphere struct {
+	mat    material
 	center vec3
 	radius float64
-	mat    material
 }
 
-func (s sphere) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
+func (s *sphere) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	// Оптимизация: прямое вычисление без промежуточных структур
 	ocX := r.orig.x - s.center.x
 	ocY := r.orig.y - s.center.y
@@ -75,7 +100,7 @@ func (s sphere) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 		rec.normal.y = -outwardNormalY
 		rec.normal.z = -outwardNormalZ
 	}
-	rec.mat = s.mat
+	rec.mat = &s.mat
 	return true
 }
 
@@ -95,22 +120,20 @@ func sphereRoot(a, halfB, c, tMin, tMax float64) (float64, bool) {
 
 // Infinite plane (used as ground).
 type plane struct {
-	point  vec3
-	normal vec3
-	mat    material
+	mat   material
+	point vec3
 }
 
-func (p plane) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
+func (p *plane) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	// Оптимизация: прямое вычисление без промежуточных структур
-	denom := p.normal.x*r.dir.x + p.normal.y*r.dir.y + p.normal.z*r.dir.z
+	// Все planes создаются горизонтальными, с нормалью (0, 1, 0).
+	denom := r.dir.y
 	if math.Abs(denom) < renderRoughnessThreshold {
 		return false
 	}
 
-	pointMinusOrigX := p.point.x - r.orig.x
 	pointMinusOrigY := p.point.y - r.orig.y
-	pointMinusOrigZ := p.point.z - r.orig.z
-	t := (pointMinusOrigX*p.normal.x + pointMinusOrigY*p.normal.y + pointMinusOrigZ*p.normal.z) / denom
+	t := pointMinusOrigY / denom
 
 	if t < tMin || t > tMax {
 		return false
@@ -125,53 +148,78 @@ func (p plane) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
 	// Оптимизация: прямое вычисление frontFace и normal
 	rec.frontFace = denom < 0
 	if rec.frontFace {
-		rec.normal.x = p.normal.x
-		rec.normal.y = p.normal.y
-		rec.normal.z = p.normal.z
+		rec.normal = vec3{x: 0, y: 1, z: 0}
 	} else {
-		rec.normal.x = -p.normal.x
-		rec.normal.y = -p.normal.y
-		rec.normal.z = -p.normal.z
+		rec.normal = vec3{x: 0, y: -1, z: 0}
 	}
-	rec.mat = p.mat
+	rec.mat = &p.mat
 	return true
 }
 
 // Axis-aligned box defined by min and max points.
 type box struct {
-	min, max vec3
-	mat      material
+	mat material
+	min vec3
+	max vec3
 }
 
-func (b box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
+func (b *box) hit(r ray, tMin, tMax float64, rec *hitRecord) bool {
+	return b.hitWithMode(r, tMin, tMax, rec, false)
+}
+
+func (b *box) hitWithMode(r ray, tMin, tMax float64, rec *hitRecord, findExit bool) bool {
 	t0 := tMin
 	t1 := tMax
 
-	for axis := range 3 {
-		invD, tNear, tFar := b.axisInterval(r, axis)
-		if invD < 0 {
-			tNear, tFar = tFar, tNear
-		}
-		if tNear > t0 {
-			t0 = tNear
-		}
-		if tFar < t1 {
-			t1 = tFar
-		}
-		if t1 <= t0 {
-			return false
-		}
+	var ok bool
+	t0, t1, ok = updateBoxInterval(t0, t1, b.min.x, b.max.x, r.orig.x, r.dir.x)
+	if !ok {
+		return false
+	}
+	t0, t1, ok = updateBoxInterval(t0, t1, b.min.y, b.max.y, r.orig.y, r.dir.y)
+	if !ok {
+		return false
+	}
+	t0, t1, ok = updateBoxInterval(t0, t1, b.min.z, b.max.z, r.orig.z, r.dir.z)
+	if !ok {
+		return false
 	}
 
 	rec.t = t0
-	rec.p = r.at(t0)
+	if findExit {
+		rec.t = t1
+	}
+	if rec.t < tMin || rec.t > tMax {
+		return false
+	}
+	rec.p = r.at(rec.t)
 
-	rec.setFaceNormal(r, b.normalAt(rec.p))
-	rec.mat = b.mat
+	outwardNormal := b.normalAt(rec.p)
+	if findExit {
+		outwardNormal = outwardNormal.mul(-1)
+	}
+	rec.setFaceNormal(r, outwardNormal)
+	rec.mat = &b.mat
 	return true
 }
 
-func (b box) normalAt(point vec3) vec3 {
+func updateBoxInterval(t0, t1, minValue, maxValue, origin, direction float64) (float64, float64, bool) {
+	invD := 1 / direction
+	tNear := (minValue - origin) * invD
+	tFar := (maxValue - origin) * invD
+	if invD < 0 {
+		tNear, tFar = tFar, tNear
+	}
+	if tNear > t0 {
+		t0 = tNear
+	}
+	if tFar < t1 {
+		t1 = tFar
+	}
+	return t0, t1, t1 > t0
+}
+
+func (b *box) normalAt(point vec3) vec3 {
 	dxMin := point.x - b.min.x
 	dxMax := b.max.x - point.x
 	dyMin := point.y - b.min.y
@@ -202,48 +250,48 @@ func (b box) normalAt(point vec3) vec3 {
 	return normal
 }
 
-func (b box) axisInterval(r ray, axis int) (float64, float64, float64) {
-	switch axis {
-	case 0:
-		invD := 1 / r.dir.x
-		return invD, (b.min.x - r.orig.x) * invD, (b.max.x - r.orig.x) * invD
-	case 1:
-		invD := 1 / r.dir.y
-		return invD, (b.min.y - r.orig.y) * invD, (b.max.y - r.orig.y) * invD
-	default:
-		invD := 1 / r.dir.z
-		return invD, (b.min.z - r.orig.z) * invD, (b.max.z - r.orig.z) * invD
-	}
-}
-
 // sceneToWorld builds hittable list from scene description.
 func sceneToWorld(sc *scene.Scene) []hittable {
-	materials := make(map[string]material)
-	for _, m := range sc.Materials {
-		materials[m.ID] = convertMaterial(m)
+	materialIndex := make(map[string]int, len(sc.Materials))
+	for i, m := range sc.Materials {
+		materialIndex[m.ID] = i
 	}
 
 	world := make([]hittable, 0, len(sc.Objects))
-	for _, o := range sc.Objects {
-		object, ok := objectToHittable(o, materials[o.MaterialID])
-		if ok {
-			world = append(world, object)
-		}
+	for sceneIdx, o := range sc.Objects {
+		material := materialAtScene(sc.Materials, materialIndex[o.MaterialID])
+		object := objectToHittable(o, convertMaterial(material))
+		object.objectIdx = len(world)
+		object.sceneIdx = sceneIdx
+		world = append(world, object)
 	}
 	return world
 }
 
-func objectToHittable(value scene.Object, mat material) (hittable, bool) {
+func materialAtScene(materials []scene.Material, index int) scene.Material {
+	if index < 0 || index >= len(materials) {
+		return scene.Material{}
+	}
+	return materials[index]
+}
+
+func objectToHittable(value scene.Object, mat material) hittable {
 	pos := v(value.Position.X, value.Position.Y, value.Position.Z)
 	size := v(value.Size.X, value.Size.Y, value.Size.Z)
 	switch value.Type {
 	case scene.ObjectSphere, scene.ObjectSphereLight:
-		return sphere{center: pos, radius: size.x, mat: mat}, true
+		return hittable{kind: hittableSphere, sphere: sphere{center: pos, radius: size.x, mat: mat}}
 	case scene.ObjectPlane:
-		return plane{point: pos, normal: v(0, 1, 0), mat: mat}, true
+		return hittable{kind: hittablePlane, pln: plane{point: pos, mat: mat}}
 	case scene.ObjectBox:
-		return box{min: pos.sub(size.mul(renderHalf)), max: pos.add(size.mul(renderHalf)), mat: mat}, true
+		return hittable{
+			kind: hittableBox,
+			box:  box{min: pos.sub(size.mul(renderHalf)), max: pos.add(size.mul(renderHalf)), mat: mat},
+		}
 	default:
-		return nil, false
+		// The GPU packing path treats unknown object types as spheres. Keep the
+		// CPU world index-compatible with that fallback instead of dropping the
+		// object and shifting every following object/light index.
+		return hittable{kind: hittableSphere, sphere: sphere{center: pos, radius: size.x, mat: mat}}
 	}
 }

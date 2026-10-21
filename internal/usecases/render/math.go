@@ -11,6 +11,9 @@ func v(x, y, z float64) vec3 { return vec3{x, y, z} }
 func (a vec3) add(b vec3) vec3    { return vec3{x: a.x + b.x, y: a.y + b.y, z: a.z + b.z} }
 func (a vec3) sub(b vec3) vec3    { return vec3{x: a.x - b.x, y: a.y - b.y, z: a.z - b.z} }
 func (a vec3) mul(t float64) vec3 { return vec3{x: a.x * t, y: a.y * t, z: a.z * t} }
+
+func mulVec3(a, b vec3) vec3 { return vec3{x: a.x * b.x, y: a.y * b.y, z: a.z * b.z} }
+
 func (a vec3) div(t float64) vec3 {
 	invT := 1.0 / t
 	return vec3{x: a.x * invT, y: a.y * invT, z: a.z * invT}
@@ -96,9 +99,11 @@ func randomCosineDirection(normal vec3, rng *randSource) vec3 {
 	phi := renderViewportDiameter * math.Pi * r1
 	cosTheta := math.Sqrt(r2)
 	sinTheta := math.Sqrt(1.0 - r2)
+	sinPhi, cosPhi := math.Sincos(phi)
 
 	// Create a local coordinate system aligned with the normal
 	// Choose an arbitrary vector not parallel to normal
+	w := normal
 	var u vec3
 	if math.Abs(normal.x) > renderEdgeThreshold {
 		u = v(0, 1, 0)
@@ -107,14 +112,13 @@ func randomCosineDirection(normal vec3, rng *randSource) vec3 {
 	}
 
 	// Build orthonormal basis
-	w := normal
 	vVec := w.cross(u).unit()
 	uVec := vVec.cross(w)
 
 	// Generate direction in local coordinate system
 	localDir := vec3{
-		x: sinTheta * math.Cos(phi),
-		y: sinTheta * math.Sin(phi),
+		x: sinTheta * cosPhi,
+		y: sinTheta * sinPhi,
 		z: cosTheta,
 	}
 

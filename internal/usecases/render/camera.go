@@ -7,13 +7,15 @@ import (
 )
 
 type camera struct {
+	rng             *randSource
 	origin          vec3
 	lowerLeftCorner vec3
 	horizontal      vec3
 	vertical        vec3
-	u, v, w         vec3
+	u               vec3
+	v               vec3
+	w               vec3
 	lensRadius      float64
-	rng             *randSource
 }
 
 func newCamera(scCam scene.Camera, cfg Config, rng *randSource) camera {
@@ -65,12 +67,12 @@ func (c camera) getRay(s, t float64) ray {
 		offset := c.u.mul(rd.x).add(c.v.mul(rd.y))
 		return ray{
 			orig: c.origin.add(offset),
-			dir:  c.lowerLeftCorner.add(c.horizontal.mul(s)).add(c.vertical.mul(t)).sub(c.origin).sub(offset),
+			dir:  c.lowerLeftCorner.add(c.horizontal.mul(s)).add(c.vertical.mul(t)).sub(c.origin).sub(offset).unit(),
 		}
 	}
 
 	return ray{
 		orig: c.origin,
-		dir:  c.lowerLeftCorner.add(c.horizontal.mul(s)).add(c.vertical.mul(t)).sub(c.origin),
+		dir:  c.lowerLeftCorner.add(c.horizontal.mul(s)).add(c.vertical.mul(t)).sub(c.origin).unit(),
 	}
 }

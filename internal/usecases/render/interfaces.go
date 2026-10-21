@@ -14,6 +14,23 @@ type GPUBackend interface {
 	Render(value *scene.Scene, config renderentity.Config, target *image.RGBA, progress renderentity.Progress) error
 }
 
+// GPUInitializer создаёт оконные ресурсы GPU в главном потоке приложения.
+type GPUInitializer interface {
+	Initialize() error
+}
+
+// GPUBackendCancelable is an optional extension used by interactive rendering.
+// It lets a backend stop before a queued request starts and between dispatch tiles.
+type GPUBackendCancelable interface {
+	RenderWithCancel(
+		value *scene.Scene,
+		config renderentity.Config,
+		target *image.RGBA,
+		progress renderentity.Progress,
+		cancelled func() bool,
+	) error
+}
+
 // GPUControls изменяет параметры GPU-рендера из входного адаптера.
 type GPUControls interface {
 	SetSelectedObjectFromUI(index int)

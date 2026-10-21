@@ -12,18 +12,26 @@ import (
 )
 
 type materialUI struct {
-	sc                       *scene.Scene
-	status                   *widget.Label
-	clearFinalImage          func()
-	startRender              func(bool)
-	selected                 int
-	list                     *widget.List
-	typeSelect               *widget.Select
-	albedo, emit             [3]*widget.Entry
-	power, rough, ior        *widget.Entry
-	smoothness, reflectivity [2]*widget.Entry
-	tint                     [3]*widget.Entry
-	absorption               *widget.Entry
+	albedo [3]*widget.Entry
+	emit   [3]*widget.Entry
+
+	tint            [3]*widget.Entry
+	smoothness      [2]*widget.Entry
+	reflectivity    [2]*widget.Entry
+	sc              *scene.Scene
+	status          *widget.Label
+	clearFinalImage func()
+	startRender     func(bool)
+
+	list       *widget.List
+	typeSelect *widget.Select
+
+	power *widget.Entry
+	rough *widget.Entry
+	ior   *widget.Entry
+
+	absorption *widget.Entry
+	selected   int
 }
 
 func newMaterialUI(sc *scene.Scene, status *widget.Label, clearFinalImage func(), startRender func(bool)) *materialUI {
@@ -311,15 +319,20 @@ func (m *materialUI) surfaceFieldObjects() []fyne.CanvasObject {
 }
 
 type objectUI struct {
-	sc                         *scene.Scene
-	materialIDs                []string
-	status                     *widget.Label
-	clearFinalImage            func()
-	startRender                func(bool)
-	selected                   int
-	list                       *widget.List
-	typeSelect, materialSelect *widget.Select
-	position, size             [3]*widget.Entry
+	position [3]*widget.Entry
+	size     [3]*widget.Entry
+	sc       *scene.Scene
+
+	status          *widget.Label
+	clearFinalImage func()
+	startRender     func(bool)
+
+	list           *widget.List
+	typeSelect     *widget.Select
+	materialSelect *widget.Select
+	materialIDs    []string
+
+	selected int
 }
 
 func newObjectUI(
